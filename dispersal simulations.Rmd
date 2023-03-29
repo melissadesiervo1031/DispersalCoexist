@@ -1,0 +1,2250 @@
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(foreach)
+library(som.nn)
+library(mcomsimr)
+```
+
+
+
+```{r setting up values for model runs with source sink dynamics}
+
+# Initizalize model setup
+
+patches <- 10 # Number of patches
+species <- 2   # Number of species
+time <- 100	   # Length of time (generations) to run model
+
+results <- array(NA, c(species, patches, time))
+results[,,1] <- 1000
+
+
+###2 species with same competitive ability (a) ####
+
+a <- 1/2000		# Beverton-holt alpha for all species 
+
+
+## s2 species with the same dispersal rate (d) ###
+
+d<- 0.05  ## dispersal###
+
+
+# Density independent growth rate R###
+
+#### setting up an array of matrices with different R## From No spatial variation, to lots of spatial variation####
+
+
+species=2
+patches=10
+meanR=1.5 ###mean growth rate source patch ###
+sdR= 0.0 ### std in growth rate### ##if 0, no variation, if >meanR/2, source sink dynamics####
+p= 0.4 ### When p = 1, no variation across patches### 
+
+Rfunc <- function(species, patches, meanR,sdR, p) {
+	R <- matrix(NA, nrow=species, ncol=patches)
+  R[1, 1:(patches/2)] <- rnorm(patches/2, mean = ifelse(p<1, meanR+(1-p), meanR), sd = sdR) ###source sp 1 ####
+  R[1, ((patches/2)+1):patches] <- rnorm(patches/2, mean = meanR*p, sd = sdR)###sink sp 1####
+  R[2, 1:(patches/2)] <- rnorm(patches/2, mean = meanR*p, sd = sdR) ### sink sp 2 ####
+  R[2, ((patches/2)+1):patches] <- rnorm(patches/2, mean = ifelse(p<1, meanR+(1-p), meanR), sd = sdR)    ## source sp 2 ####
+  return(R)
+}
+
+R<-Rfunc(species,patches,meanR,sdR,p)
+
+
+
+
+###bookeeping###
+
+speciesnames <- vector("numeric", length=species)
+for(i in 1:species){
+  speciesnames[i] <- paste("species", i)
+}
+
+
+patchnames <- vector("numeric", length=patches)
+for(i in 1:patches){
+  patchnames[i] <- paste("patch", i)
+}
+
+timenames <- vector("numeric", length=time)
+for(i in 1:time){
+  timenames[i] <- paste("timestep", i)
+}
+
+
+
+```
+
+```{r deconstruct coexistence random movement}
+
+##Determining Chessonian coexistence strength and contributions from
+# the storage effect, fitness density covariance, and nonspatial fitness
+
+runs <- 1   # Number of runs (for stochastic models)
+nonspatial <- storage <- fitness <- overall <- check <- rep(NA, runs)
+
+invader <- 1  # Resident dynamics (all species that are not the invader) run to equilibrium. 
+
+	results <- array(NA, c(species, patches, time))
+	results[,,1] <- 1000
+	results[invader,,1] <- 0 # Remove the invader species from the metacommunity
+	
+	# Running the model to equilibrium without the invader
+	modelRun <- rdet(R,d,a,patches,species,results,time)
+	
+	# Then run invader to equilibrium spatial distribution, holding the global
+	# abundance to a very low density
+	iabun <- .005*(sum(modelRun[,,time]))
+	invade <- rep(iabun/patches,patches) ##divides equally among the patches##
+	
+	# Set up array to store results with the invader at low density
+	co_results <- array(NA, c(species, patches, time))
+	co_results[,,1] <- modelRun[,,time]
+	co_results[invader,,1] <- invade # species i invades at time step 1
+	
+	modelRunChesson <- rdetChesson(R,d,a,patches,species,co_results,invader,iabun,time) ##each patch at it's equilibrium densityy##
+	
+	# Now do one more time step, keeeping track of changes in population before vs. after			
+	N_start <- modelRunChesson[,,time] # starting population size
+	N_startj <- N_start[-invader,]     # j is all resident species
+	N_starti <- N_start[invader,]	   # i is invader species
+	
+	# Determine relative abundances
+	v <- matrix(NA, nrow=species, ncol=patches)
+	for (i in 1:species) {
+		v[i,] <- N_start[i,]/mean(N_start[i,])
+	}
+	
+	v_i <- v[invader,]
+	v_j <- v[-invader,]
+	
+	# Determine fitness
+	N_birth <- b(R, N_start, patches, species, a) # Population after 1 time step
+	N_birthi <- N_birth[invader,]
+	N_birthj <- N_birth[-invader,]
+	
+	# Calculate average fitness across the metacommunity
+	R_bar <- rep(NA,species)
+	for (i in 1:species) {
+		R_bar[i] <- mean(R[i,])
+	}
+	
+	R_bari <- R_bar[invader]
+	R_barj <- R_bar[-invader]
+	
+	# Calculate environmental component
+	E <- R/R_bar 
+	Ei <- E[invader,]
+	Ej <- E[-invader,]
+	
+	# Calculate competitive term
+	C <- matrix(NA, nrow=species, ncol=patches) 
+	for (p in 1: patches) {
+		C[,p] <-rep(1-bevHoltC(N_start[,p],a), species)
+	}
+	C <- C[invader,]
+	
+	
+	#Overall invasion criterion
+	lambda_tilde_i <- sum(N_birthi) / sum(N_starti) #Overall global growth rate
+	lambda_i_community_level <- (lambda_tilde_i - 1) / R_bari
+	
+	lambda_tilde_j <- sum(N_birthj) / sum(N_startj) #Overall global growth rate
+	lambda_j_community_level <- (lambda_tilde_j - 1) / R_barj
+
+	
+	print(paste("Metacommunity Growth Rate is", round(lambda_i_community_level-lambda_j_community_level,3)))
+	print(paste(" Invade?", lambda_i_community_level-lambda_j_community_level > 0))
+	
+	# ----------------------------------------------------------------
+	# Components for coexistence, broxen down into the specific mechanisms
+	
+	lambda_tilde_prime <- (1/mean(R_barj))-(1/R_bari) # Non-spatial fitness
+		
+	storageEffect <- -covp( Ei-Ej,C )				  # Storage effect
+	
+	fd1 <- covp( R[invader,]*(1-C), v_i )/R_bari
+	
+	fd2 <- covp( R[-invader,]*(1-C), v_j )/R_barj
+	
+	fitnessDensityCov <- fd1- fd2				 	# Fitness density covariance
+	
+	total <- lambda_tilde_prime + storageEffect + fitnessDensityCov
+	
+# Store results of coexistence mechanisms
+nonspatial<-lambda_tilde_prime
+storage <- storageEffect
+fitness <- fitnessDensityCov
+overallr <- total
+
+	
+coexistrandom<-as.data.frame(rbind(overallr, storage, fitness, nonspatial))
+coexistrandom1 <- tibble::rownames_to_column(coexistrandom, "Mechanism")
+
+coexistrandom2<-coexistrandom1 %>% mutate(Mechanism2 =Mechanism)%>% mutate(model ="Passive dispersal")
+
+
+coexistrandom2$Mechanism2<-plyr::mapvalues(coexistrandom2$Mechanism, from=c("overallr", "storage", "fitness","nonspatial" ), to=c("Total", "Storage effect", "Fitness-density cov", "Non-spatial"))
+
+coexistrandom2$Mechanism2<- factor(coexistrandom2$Mechanism2, levels = c("Total", "Storage effect", "Fitness-density cov", "Non-spatial"))
+
+###
+```
+
+
+```{r deconstruct coexistence directed movement}
+
+##Determining Chessonian coexistence strength and contributions from
+# the storage effect, fitness density covariance, and nonspatial fitness
+
+runs <- 1   # Number of runs (for stochastic models)
+nonspatial <- storage <- fitness <- overall <- check <- rep(NA, runs)
+
+invader <- 1  # Resident dynamics (all species that are not the invader) run to equilibrium. 
+
+	results <- array(NA, c(species, patches, time))
+	results[,,1] <- 1000
+	results[invader,,1] <- 0 # Remove the invader species from the metacommunity
+	
+	# Running the model to equilibrium without the invader
+	modelRundirected <- rdetdirected(R,d,a,patches,species,results,time)
+	
+	# Then run invader to equilibrium spatial distribution, holding the global
+	# abundance to a very low density
+	iabun <- .005*(sum(modelRundirected [,,time]))
+	invade <- rep(iabun/patches,patches) ##divides equally among the patches##
+	
+	# Set up array to store results with the invader at low density
+	co_results <- array(NA, c(species, patches, time))
+	co_results[,,1] <- modelRundirected[,,time]
+	co_results[invader,,1] <- invade # species i invades at time step 1
+	
+	modelRunChessondirected <- rdetdirectedChesson(R,d,a,patches,species,co_results,invader,iabun,time) ##each patch at it's equilibrium densityy##
+	
+	# Now do one more time step, keeeping track of changes in population before vs. after			
+	N_start <- modelRunChessondirected[,,time] # starting population size
+	N_startj <- N_start[-invader,]     # j is all resident species
+	N_starti <- N_start[invader,]	   # i is invader species
+	
+	# Determine relative abundances
+	v <- matrix(NA, nrow=species, ncol=patches)
+	for (i in 1:species) {
+		v[i,] <- N_start[i,]/mean(N_start[i,])
+	}
+	
+	v_i <- v[invader,]
+	v_j <- v[-invader,]
+	
+	# Determine fitness
+	N_birth <- b(R, N_start, patches, species, a) # Population after 1 time step
+	N_birthi <- N_birth[invader,]
+	N_birthj <- N_birth[-invader,]
+	
+	# Calculate average fitness across the metacommunity
+	R_bar <- rep(NA,species)
+	for (i in 1:species) {
+		R_bar[i] <- mean(R[i,])
+	}
+	
+	R_bari <- R_bar[invader]
+	R_barj <- R_bar[-invader]
+	
+	# Calculate environmental component
+	E <- R/R_bar 
+	Ei <- E[invader,]
+	Ej <- E[-invader,]
+	
+	# Calculate competitive term
+	C <- matrix(NA, nrow=species, ncol=patches) 
+	for (p in 1: patches) {
+		C[,p] <-rep(1-bevHoltC(N_start[,p],a), species)
+	}
+	C <- C[invader,]
+	
+	
+	#Overall invasion criterion
+	lambda_tilde_i <- sum(N_birthi) / sum(N_starti) #Overall global growth rate
+	lambda_i_community_level <- (lambda_tilde_i - 1) / R_bari
+	
+	lambda_tilde_j <- sum(N_birthj) / sum(N_startj) #Overall global growth rate
+	lambda_j_community_level <- (lambda_tilde_j - 1) / R_barj
+
+	
+	print(paste("Metacommunity Growth Rate is", round(lambda_i_community_level-lambda_j_community_level,3)))
+	print(paste(" Invade?", lambda_i_community_level-lambda_j_community_level > 0))
+	
+	# ----------------------------------------------------------------
+	# Components for coexistence, broxen down into the specific mechanisms
+	
+	lambda_tilde_prime <- (1/mean(R_barj))-(1/R_bari) # Non-spatial fitness
+		
+	storageEffect <- -covp( Ei-Ej,C )				  # Storage effect
+	
+	fd1 <- covp( R[invader,]*(1-C), v_i )/R_bari
+	
+	fd2 <- covp( R[-invader,]*(1-C), v_j )/R_barj
+	
+	fitnessDensityCov <- fd1- fd2				 	# Fitness density covariance
+	
+	total <- lambda_tilde_prime + storageEffect + fitnessDensityCov
+	
+	
+	
+# Store results of coexistence mechanisms
+nonspatial<-lambda_tilde_prime
+storage <- storageEffect
+fitness <- fitnessDensityCov
+overallr <- total
+
+	
+coexistdirected<-as.data.frame(rbind(overallr, storage, fitness, nonspatial))
+coexistdirected1 <- tibble::rownames_to_column(coexistdirected, "Mechanism")
+
+coexistdirected2<-coexistdirected1 %>% mutate(Mechanism2 =Mechanism)%>% mutate(model ="Fitness-directed dispersal")
+
+
+coexistdirected2$Mechanism2<-plyr::mapvalues(coexistdirected2$Mechanism, from=c("overallr", "storage", "fitness","nonspatial" ), to=c("Total", "Storage effect", "Fitness-density cov", "Non-spatial"))
+
+coexistdirected2$Mechanism2<- factor(coexistdirected2$Mechanism2, levels = c("Total", "Storage effect", "Fitness-density cov", "Non-spatial"))
+	
+	
+
+###
+```
+
+
+```{r deconstruct coexistence density-dependent (-) immigration}
+
+##Determining Chessonian coexistence strength and contributions from
+# the storage effect, fitness density covariance, and nonspatial fitness
+
+runs <- 1   # Number of runs (for stochastic models)
+nonspatial <- storage <- fitness <- overall <- check <- rep(NA, runs)
+
+invader <- 1  # Resident dynamics (all species that are not the invader) run to equilibrium. 
+
+	results <- array(NA, c(species, patches, time))
+	results[,,1] <- 1000
+	results[invader,,1] <- 0 # Remove the invader species from the metacommunity
+	
+	# Running the model to equilibrium without the invader
+	modelRunddi <- rdetddi(R,d,a,patches,species,results,time)
+
+	# Then run invader to equilibrium spatial distribution, holding the global
+	# abundance to a very low density
+	iabun <- .005*(sum(modelRunddi[,,time]))
+	invade <- rep(iabun/patches,patches) ##divides equally among the patches##
+	
+	# Set up array to store results with the invader at low density
+	co_results <- array(NA, c(species, patches, time))
+	co_results[,,1] <- modelRunddi[,,time]
+	co_results[invader,,1] <- invade # species i invades at time step 1
+	
+	modelRunChessonddi <- rdetddiChesson(R,d,a,patches,species,co_results,invader,iabun,time) ##each patch at it's equilibrium densityy##
+	
+	# Now do one more time step, keeeping track of changes in population before vs. after			
+	N_start <- modelRunChessonddi[,,time] # starting population size
+	N_startj <- N_start[-invader,]     # j is all resident species
+	N_starti <- N_start[invader,]	   # i is invader species
+	
+	# Determine relative abundances
+	v <- matrix(NA, nrow=species, ncol=patches)
+	for (i in 1:species) {
+		v[i,] <- N_start[i,]/mean(N_start[i,])
+	}
+	
+	v_i <- v[invader,]
+	v_j <- v[-invader,]
+	
+	# Determine fitness
+	N_birth <- b(R, N_start, patches, species, a) # Population after 1 time step
+	N_birthi <- N_birth[invader,]
+	N_birthj <- N_birth[-invader,]
+	
+	# Calculate average fitness across the metacommunity
+	R_bar <- rep(NA,species)
+	for (i in 1:species) {
+		R_bar[i] <- mean(R[i,])
+	}
+	
+	R_bari <- R_bar[invader]
+	R_barj <- R_bar[-invader]
+	
+	# Calculate environmental component
+	E <- R/R_bar 
+	Ei <- E[invader,]
+	Ej <- E[-invader,]
+	
+	# Calculate competitive term
+	C <- matrix(NA, nrow=species, ncol=patches) 
+	for (p in 1: patches) {
+		C[,p] <-rep(1-bevHoltC(N_start[,p],a), species)
+	}
+	C <- C[invader,]
+	
+	
+	#Overall invasion criterion
+	lambda_tilde_i <- sum(N_birthi) / sum(N_starti) #Overall global growth rate
+	lambda_i_community_level <- (lambda_tilde_i - 1) / R_bari
+	
+	lambda_tilde_j <- sum(N_birthj) / sum(N_startj) #Overall global growth rate
+	lambda_j_community_level <- (lambda_tilde_j - 1) / R_barj
+
+	
+	print(paste("Metacommunity Growth Rate is", round(lambda_i_community_level-lambda_j_community_level,3)))
+	print(paste(" Invade?", lambda_i_community_level-lambda_j_community_level > 0))
+	
+	# ----------------------------------------------------------------
+	# Components for coexistence, broxen down into the specific mechanisms
+	
+	lambda_tilde_prime <- (1/mean(R_barj))-(1/R_bari) # Non-spatial fitness
+		
+	storageEffect <- -covp( Ei-Ej,C )				  # Storage effect
+	
+	fd1 <- covp( R[invader,]*(1-C), v_i )/R_bari
+	
+	fd2 <- covp( R[-invader,]*(1-C), v_j )/R_barj
+	
+	fitnessDensityCov <- fd1- fd2				 	# Fitness density covariance
+	
+	total <- lambda_tilde_prime + storageEffect + fitnessDensityCov
+	
+	
+	
+# Store results of coexistence mechanisms
+nonspatial<-lambda_tilde_prime
+storage <- storageEffect
+fitness <- fitnessDensityCov
+overallr <- total
+
+	
+coexistddi<-as.data.frame(rbind(overallr, storage, fitness, nonspatial))
+coexistddi1 <- tibble::rownames_to_column(coexistddi, "Mechanism")
+
+coexistddi2<-coexistddi1%>% mutate(Mechanism2 =Mechanism)%>% mutate(model ="Density-dependent (-) dispersal")
+
+
+coexistddi2$Mechanism2<-plyr::mapvalues(coexistddi2$Mechanism, from=c("overallr", "storage", "fitness","nonspatial" ), to=c("Total", "Storage effect", "Fitness-density cov", "Non-spatial"))
+
+coexistddi2$Mechanism2<- factor(coexistddi2$Mechanism2, levels = c("Total", "Storage effect", "Fitness-density cov", "Non-spatial"))
+	
+	
+
+###
+```
+
+
+```{r deconstruct coexistence density-dependent (+) immigration}
+
+##Determining Chessonian coexistence strength and contributions from
+# the storage effect, fitness density covariance, and nonspatial fitness
+
+runs <- 1   # Number of runs (for stochastic models)
+nonspatial <- storage <- fitness <- overall <- check <- rep(NA, runs)
+
+invader <- 1  # Resident dynamics (all species that are not the invader) run to equilibrium. 
+
+	results <- array(NA, c(species, patches, time))
+	results[,,1] <- 1000
+	results[invader,,1] <- 0 # Remove the invader species from the metacommunity
+	
+	# Running the model to equilibrium without the invader
+	modelRunddi_pos <- rdetddi_pos(R,d,a,patches,species,results,time)
+
+	# Then run invader to equilibrium spatial distribution, holding the global
+	# abundance to a very low density
+	iabun <- .005*(sum(modelRunddi_pos[,,time]))
+	invade <- rep(iabun/patches,patches) ##divides equally among the patches##
+	
+	# Set up array to store results with the invader at low density
+	co_results <- array(NA, c(species, patches, time))
+	co_results[,,1] <- modelRunddi_pos[,,time]
+	co_results[invader,,1] <- invade # species i invades at time step 1
+	
+	modelRunChessonddi_pos <- rdetddiChesson_pos(R,d,a,patches,species,co_results,invader,iabun,time) ##each patch at it's equilibrium densityy##
+	
+	# Now do one more time step, keeeping track of changes in population before vs. after			
+	N_start <- modelRunChessonddi_pos[,,time] # starting population size
+	N_startj <- N_start[-invader,]     # j is all resident species
+	N_starti <- N_start[invader,]	   # i is invader species
+	
+	# Determine relative abundances
+	v <- matrix(NA, nrow=species, ncol=patches)
+	for (i in 1:species) {
+		v[i,] <- N_start[i,]/mean(N_start[i,])
+	}
+	
+	v_i <- v[invader,]
+	v_j <- v[-invader,]
+	
+	# Determine fitness
+	N_birth <- b(R, N_start, patches, species, a) # Population after 1 time step
+	N_birthi <- N_birth[invader,]
+	N_birthj <- N_birth[-invader,]
+	
+	# Calculate average fitness across the metacommunity
+	R_bar <- rep(NA,species)
+	for (i in 1:species) {
+		R_bar[i] <- mean(R[i,])
+	}
+	
+	R_bari <- R_bar[invader]
+	R_barj <- R_bar[-invader]
+	
+	# Calculate environmental component
+	E <- R/R_bar 
+	Ei <- E[invader,]
+	Ej <- E[-invader,]
+	
+	# Calculate competitive term
+	C <- matrix(NA, nrow=species, ncol=patches) 
+	for (p in 1: patches) {
+		C[,p] <-rep(1-bevHoltC(N_start[,p],a), species)
+	}
+	C <- C[invader,]
+	
+	
+	#Overall invasion criterion
+	lambda_tilde_i <- sum(N_birthi) / sum(N_starti) #Overall global growth rate
+	lambda_i_community_level <- (lambda_tilde_i - 1) / R_bari
+	
+	lambda_tilde_j <- sum(N_birthj) / sum(N_startj) #Overall global growth rate
+	lambda_j_community_level <- (lambda_tilde_j - 1) / R_barj
+
+	
+	print(paste("Metacommunity Growth Rate is", round(lambda_i_community_level-lambda_j_community_level,3)))
+	print(paste(" Invade?", lambda_i_community_level-lambda_j_community_level > 0))
+	
+	# ----------------------------------------------------------------
+	# Components for coexistence, broxen down into the specific mechanisms
+	
+	lambda_tilde_prime <- (1/mean(R_barj))-(1/R_bari) # Non-spatial fitness
+		
+	storageEffect <- -covp( Ei-Ej,C )				  # Storage effect
+	
+	fd1 <- covp( R[invader,]*(1-C), v_i )/R_bari
+	
+	fd2 <- covp( R[-invader,]*(1-C), v_j )/R_barj
+	
+	fitnessDensityCov <- fd1- fd2				 	# Fitness density covariance
+	
+	total <- lambda_tilde_prime + storageEffect + fitnessDensityCov
+	
+	
+	
+# Store results of coexistence mechanisms
+nonspatial<-lambda_tilde_prime
+storage <- storageEffect
+fitness <- fitnessDensityCov
+overallr <- total
+
+	
+coexistddi_pos<-as.data.frame(rbind(overallr, storage, fitness, nonspatial))
+coexistddi1_pos <- tibble::rownames_to_column(coexistddi_pos, "Mechanism")
+
+coexistddi2_pos<-coexistddi1_pos%>% mutate(Mechanism2 =Mechanism)%>% mutate(model ="Density-dependent (+) dispersal")
+
+
+coexistddi2_pos$Mechanism2<-plyr::mapvalues(coexistddi2_pos$Mechanism, from=c("overallr", "storage", "fitness","nonspatial" ), to=c("Total", "Storage effect", "Fitness-density cov", "Non-spatial"))
+
+coexistddi2_pos$Mechanism2<- factor(coexistddi2_pos$Mechanism2, levels = c("Total", "Storage effect", "Fitness-density cov", "Non-spatial"))
+	
+###
+```
+
+
+
+```{r plot results strength coexistence random}
+
+coexistdispersal<-rbind(coexistrandom2, coexistdirected2, coexistddi2, coexistddi2_pos)
+
+coexistdispersal2<-subset(coexistdispersal, model=="Passive dispersal" & Mechanism2!="Non-spatial")
+
+
+LDGRpassive<-ggplot(data=coexistdispersal2, aes(x=Mechanism2, y=V1, fill=Mechanism2)) +
+  geom_bar(stat="identity")+xlab("")+ylab("LDGR")+mytheme +theme(axis.text.x = element_text(angle = 35, hjust = 1))+ scale_fill_manual(values = c("gray30", "#ff8c00", "#346299"))+ggtitle("Passive dispersal")
+
+
+jpeg("C:/Users/Melissa/Dropbox/Coexistance stuff/Dispersal/LDGRpassive.jpeg", width = 4, height = 4, units = 'in', res = 600)
+LDGRpassive
+dev.off()
+
+
+###
+```
+
+
+
+```{r plot results strength coexistence random vs. directed vs. density-dependent (+ and -)}
+
+passive=coexistrandom2$V1
+
+coexistdirected22<-cbind(coexistdirected2, passive)
+coexistddi22<-cbind(coexistddi2, passive)
+coexistddi_pos22<-cbind(coexistddi2_pos, passive)
+
+directedall<-rbind(coexistdirected22, coexistddi22, coexistddi_pos22)
+
+directedall2<-directedall %>% mutate(deltachange=(V1-passive)*100) %>% filter(Mechanism2 != "Non-spatial")
+
+
+directedall2$model <- factor(directedall2$model, levels = c("Fitness-directed dispersal", "Density-dependent (-) dispersal", "Density-dependent (+) dispersal"))
+
+
+mechanismsdisp<-ggplot(data=directedall2, aes(x=Mechanism2, y=deltachange, fill=Mechanism2)) +
+  geom_bar(stat="identity")+xlab("")+ylab(" % change in LDGR")+facet_grid(~model)+mytheme +theme(axis.text.x = element_text(angle = 35, hjust = 1))+ scale_fill_manual(values = c("gray30", "#ff8c00", "#346299"))+ theme(legend.position = "none")
+
+
+jpeg("C:/Users/Melissa/Dropbox/Coexistance stuff/Dispersal/LDGRchangemechanisms.jpeg", width =8, height = 4, units = 'in', res = 600)
+mechanismsdisp
+dev.off()
+
+
+###
+```
+
+
+#### plot time series####
+
+
+```{r passive movement with varying dispersal}
+
+# Initizalize model setup
+
+patches <- 10 # Number of patches
+species <- 2   # Number of species
+time <- 100	   # Length of time (generations) to run model
+
+results <- array(NA, c(species, patches, time))
+results[,,1] <- 100
+
+
+a <- 1/2000		# Beverton-holt alpha for all species 
+
+# Density independent growth rate R###
+
+meanR=1.6 ###mean growth rate patch ###
+sdR= 0 ### std in growth rate### ##if 0, no variation, if >meanR/2, source sink dynamics####
+SS=2   ###Source sink dynamics##, if 1 no SS, if >2, source sink dynamics#####
+ 
+Rfunc <- function(species, patches, meanR,sdR, SS) {
+	R <- matrix(NA, nrow=species, ncol=patches)
+  R[1, 1:(patches/2)] <- rnorm(patches/2, mean = meanR, sd = sdR)  ###source sp 1 ####
+  R[1, ((patches/2)+1):patches] <- rnorm(patches/2, mean = meanR/SS, sd = sdR)###sink sp 1####
+  R[2, 1:(patches/2)] <- rnorm(patches/2, mean = meanR/SS, sd = sdR) ### sink sp 2 ####
+  R[2, ((patches/2)+1):patches] <- rnorm(patches/2, mean = meanR, sd = sdR)    ## source sp 2 ####
+  return(R)
+}
+
+R<-Rfunc(species,patches,meanR,sdR,SS)
+
+## setting up matrix d vals #### different dispersal rates### (still same between sp 1 and 2)
+##
+
+d_vals2=c(0, 0.05, 0.1, 0.5, 0.9)
+
+d_vals<-as.matrix(rbind(d_vals2, d_vals2))
+
+###bookeeping###
+
+dispnames <- vector("numeric", length=length(d_vals))
+for(i in 1:length(d_vals)){
+  dispnames[i] <- paste("d=", d_vals[i])
+}
+
+speciesnames <- vector("numeric", length=species)
+for(i in 1:species){
+  speciesnames[i] <- paste("species", i)
+}
+
+
+patchnames <- vector("numeric", length=patches)
+for(i in 1:patches){
+  patchnames[i] <- paste("patch", i)
+}
+
+timenames <- vector("numeric", length=time)
+for(i in 1:time){
+  timenames[i] <- paste("timestep", i)
+}
+
+
+###global dispersal###
+
+dispscenariosrandom12 <- foreach(i=d_vals[1:2,], j=d_vals[,1:length(d_vals2)]) %do% 
+rdet(R,d=c(i,j),a,patches,species,results,time)
+
+
+dispscenariosrandom122<-array(as.numeric(unlist(dispscenariosrandom12 )), dim=c(species,patches,time,length(d_vals)), dimnames=list(speciesnames, patchnames, timenames,dispnames)) ##array with labels####
+
+
+#
+
+```
+
+
+```{r plot time series results random movement varying d , echo=FALSE}
+
+###turn array into dataframe###
+
+dispdatarandom <- as.data.frame.table(dispscenariosrandom122)
+
+colnames(dispdatarandom) <- c("species", "patch", "timestep", "d", "N")
+
+dispdatarandom$species<-as.numeric(dispdatarandom$species)
+dispdatarandom$patch<-as.numeric(dispdatarandom$patch)
+dispdatarandom$timestep<-as.numeric(dispdatarandom$timestep)
+dispdatarandom$d <- with(dispdatarandom, gsub("d=","", d))
+
+
+##assign R values to patches###
+ 
+species1<-as.numeric(dispdatarandom$species)
+patch1<-as.numeric(dispdatarandom$patch)
+
+Rvals <- vector("numeric", length=length(species1))
+for (i in 1:length(species1)){
+   s<-species1[i]
+   p<-patch1[i]
+   Rvals[i]<-c(R[s,p])
+}
+
+
+##merge back to dataframe###
+
+dispdatarandom2<-cbind(dispdatarandom, Rvals)
+
+##column for patch type###
+
+dispdatarandom3<-dispdatarandom2 %>% mutate(patchtype=ifelse(species==1 & Rvals>mean(dispdatarandom2$Rvals),"Source sp 1 / Sink sp 2", ifelse(species==2 & Rvals < mean(dispdatarandom2$Rvals),"Source sp 1 / Sink sp 2", "Source sp 2 / Sink sp 1")))
+
+###sum across patch types####
+
+sumpatchrandom<-dispdatarandom3 %>%
+  group_by(species, patch, timestep, d, patchtype) %>%
+  summarise(N = sum(N))
+
+sumpatchrandom$species=as.factor(sumpatchrandom$species)
+sumpatchrandom$timestep<-as.numeric(sumpatchrandom$timestep)
+
+
+
+##subset##
+sumpatchrandom2<-subset(sumpatchrandom, d==" 0"|d==" 0.05"|d==" 0.5")
+
+
+
+#plot##
+
+
+mytheme<- theme_bw()+ theme(axis.line.x= element_line(colour = "black", size=0.3))+theme(axis.line.y= element_line(colour = "black", size=0.3))+theme(axis.text.x=element_text(size=10, colour = "black"))+theme(axis.text.y=element_text(size=10, colour = "black"))+theme(axis.title=element_text(size=12))+theme(plot.title=element_text(size=12) +theme(plot.title = element_text(hjust = 0.5)))+theme(plot.title = element_text(margin=margin(0,0,5,0)))
+
+
+
+randommovement2spp<-ggplot(sumpatchrandom2 ,aes(x=timestep,y=N,colour=species, shape=patchtype), show.legend = F) +geom_line(aes(linetype=patchtype), size=1.5)+facet_grid(d~species, labeller = label_both)+xlab("Time")+ylim(0,2500)+ylab("Abundance")+ggtitle("Passive dispersal")+mytheme+ scale_colour_manual(values = c("black", "brown"))
+
+
+
+jpeg("C:/Users/Melissa/Dropbox/Coexistance stuff/Dispersal/passivedisp1.jpeg", width = 6, height = 5, units = 'in', res = 600)
+randommovement2spp
+dev.off()
+
+
+
+
+###
+```
+
+
+```{r passive movement with varying R}
+
+# Initizalize model setup
+
+patches <- 10 # Number of patches
+species <- 2   # Number of species
+time <- 100	   # Length of time (generations) to run model
+
+results <- array(NA, c(species, patches, time))
+results[,,1] <- 100
+
+
+a <- 1/2000		# Beverton-holt alpha for all species 
+
+# Density independent growth rate R###
+
+
+species=2
+patches=10
+meanR=1.5 ###mean growth rate source patch ###
+sdR= 0.001 ### std in growth rate### ##if 0, no variation, if >meanR/2, source sink dynamics####
+p= 1 ### When p = 1, no variation across patches### 
+
+Rfunc <- function(species, patches, meanR,sdR, p) {
+	R <- matrix(NA, nrow=species, ncol=patches)
+  R[1, 1:(patches/2)] <- rnorm(patches/2, mean = ifelse(p<1, meanR+(1-p), meanR), sd = sdR) ###source sp 1 ####
+  R[1, ((patches/2)+1):patches] <- rnorm(patches/2, mean = meanR*p, sd = sdR)###sink sp 1####
+  R[2, 1:(patches/2)] <- rnorm(patches/2, mean = meanR*p, sd = sdR) ### sink sp 2 ####
+  R[2, ((patches/2)+1):patches] <- rnorm(patches/2, mean = ifelse(p<1, meanR+(1-p), meanR), sd = sdR)    ## source sp 2 ####
+  return(R)
+}
+
+R<-Rfunc(species,patches,meanR,sdR,p)
+
+p_vals=seq(from=1, to=0.33, by=-0.05) ###### mid way point = source sink dynamics###
+
+R_vals=foreach(i=p_vals) %do% Rfunc(species,patches,meanR, sdR, p=c(i))
+
+
+## setting up 
+
+
+###bookeeping###
+
+Rnames <- vector("numeric", length=length(p_vals))
+for(i in 1:length(p_vals)){
+  Rnames[i] <- paste("R=", p_vals[i])
+}
+
+speciesnames <- vector("numeric", length=species)
+for(i in 1:species){
+  speciesnames[i] <- paste("species", i)
+}
+
+
+patchnames <- vector("numeric", length=patches)
+for(i in 1:patches){
+  patchnames[i] <- paste("patch", i)
+}
+
+timenames <- vector("numeric", length=time)
+for(i in 1:time){
+  timenames[i] <- paste("timestep", i)
+}
+
+
+###global dispersal###
+
+
+###global dispersal###
+
+d=c(0.05, 0.05)
+
+disprandom_varR <- foreach(i=R_vals[]) %do% 
+rdet(R=i,d,a,patches,species,results,time)
+
+
+disprandom_varR_2<-array(as.numeric(unlist(disprandom_varR )), dim=c(species,patches,time,length(R_vals)), dimnames=list(speciesnames, patchnames, timenames,Rnames)) ##array with labels####
+
+
+#
+
+```
+
+
+```{r plot time series results random movement varying R , echo=FALSE}
+
+###turn array into dataframe###
+
+disprandomvarRdf<- as.data.frame.table(disprandom_varR_2)
+
+colnames(disprandomvarRdf) <- c("species", "patch", "timestep", "R", "N")
+
+disprandomvarRdf$species<-as.numeric(disprandomvarRdf$species)
+disprandomvarRdf$patch<-as.numeric(disprandomvarRdf$patch)
+disprandomvarRdf$timestep<-as.numeric(disprandomvarRdf$timestep)
+disprandomvarRdf$R <- with(disprandomvarRdf, gsub("R=","", R))
+
+disprandomvarRdf$R<-as.numeric(disprandomvarRdf$R)
+
+##column for patch type###
+
+####when R >
+
+
+disprandomvarRdf_2<-disprandomvarRdf %>% mutate(patchtype=ifelse(R > 0.67, "Source both sp", ifelse(patch <6, "Source sp 1 / Sink sp 2", "Source sp 2 / Sink sp 1")))
+                                                                   
+                                                                   
+
+###sum across patch types####
+
+sumpatchrandom_varR<-disprandomvarRdf_2 %>%
+  group_by(species, timestep, R, patchtype) %>%
+  summarise(N = sum(N))
+
+sumpatchrandom_varR$species=as.factor(sumpatchrandom_varR$species)
+sumpatchrandom_varR$timestep<-as.numeric(sumpatchrandom_varR$timestep)
+
+
+
+##subset##
+
+##subset##
+sumpatchrandom_varR2<-subset(sumpatchrandom_varR, R==1.00|R==0.8|R==0.35)
+
+sumpatchrandom_varR2$R=factor(sumpatchrandom_varR2$R, levels=c("1", "0.8", "0.35"))
+
+
+#plot##
+
+
+mytheme<- theme_bw()+ theme(axis.line.x= element_line(colour = "black", size=0.3))+theme(axis.line.y= element_line(colour = "black", size=0.3))+theme(axis.text.x=element_text(size=10, colour = "black"))+theme(axis.text.y=element_text(size=10, colour = "black"))+theme(axis.title=element_text(size=12))+theme(plot.title=element_text(size=12) +theme(plot.title = element_text(hjust = 0.5)))+theme(plot.title = element_text(margin=margin(0,0,5,0)))
+
+
+
+randommovement2spp_varR<-ggplot(sumpatchrandom_varR2 ,aes(x=timestep,y=N,colour=species, shape=patchtype), show.legend = F) +geom_line(aes(linetype=patchtype), size=1.5)+facet_grid(R~species, labeller = label_both)+xlab("Time")+ylab("Abundance")+ggtitle("Passive dispersal")+mytheme+ scale_colour_manual(values = c("black", "brown"))+ scale_linetype_manual(values=c("dotted", "solid", "dashed"))
+
+
+jpeg("C:/Users/Melissa/Dropbox/Coexistance stuff/Dispersal/passivedisp_varR.jpeg", width = 6, height = 5, units = 'in', res = 600)
+randommovement2spp_varR
+dev.off()
+
+
+
+
+###
+```
+
+
+```{r plot results random movement , echo=FALSE}
+
+###turn array into dataframe###
+
+dispdatarandom <- as.data.frame.table(dispscenariosrandom122)
+
+colnames(dispdatarandom) <- c("species", "patch", "timestep", "d", "N")
+
+dispdatarandom$species<-as.numeric(dispdatarandom$species)
+dispdatarandom$patch<-as.numeric(dispdatarandom$patch)
+dispdatarandom$timestep<-as.numeric(dispdatarandom$timestep)
+dispdatarandom$d <- with(dispdatarandom, gsub("d=","", d))
+
+
+##assign R values to patches###
+ 
+species1<-as.numeric(dispdatarandom$species)
+patch1<-as.numeric(dispdatarandom$patch)
+
+Rvals <- vector("numeric", length=length(species1))
+for (i in 1:length(species1)){
+   s<-species1[i]
+   p<-patch1[i]
+   Rvals[i]<-c(R[s,p])
+}
+
+
+##merge back to dataframe###
+
+dispdatarandom2<-cbind(dispdatarandom, Rvals)
+
+##column for patch type###
+
+dispdatarandom3<-dispdatarandom2 %>% mutate(patchtype=ifelse(species==1 & Rvals>mean(dispdatarandom2$Rvals),"Source sp 1 / Sink sp 2", ifelse(species==2 & Rvals < mean(dispdatarandom2$Rvals),"Source sp 1 / Sink sp 2", "Source sp 2 / Sink sp 1")))
+
+###sum across patch types####
+
+sumpatchrandom<-dispdatarandom3 %>%
+  group_by(species, patch, timestep, d, patchtype) %>%
+  summarise(N = sum(N))
+
+sumpatchrandom$species=as.factor(sumpatchrandom$species)
+sumpatchrandom$timestep<-as.numeric(sumpatchrandom$timestep)
+
+
+
+##subset##
+sumpatchrandom2<-subset(sumpatchrandom, d==" 0"|d==" 0.05"|d==" 0.5")
+
+
+
+#plot##
+
+
+mytheme<- theme_bw()+ theme(axis.line.x= element_line(colour = "black", size=0.3))+theme(axis.line.y= element_line(colour = "black", size=0.3))+theme(axis.text.x=element_text(size=10, colour = "black"))+theme(axis.text.y=element_text(size=10, colour = "black"))+theme(axis.title=element_text(size=12))+theme(plot.title=element_text(size=12) +theme(plot.title = element_text(hjust = 0.5)))+theme(plot.title = element_text(margin=margin(0,0,5,0)))
+
+
+
+randommovement2spp<-ggplot(sumpatchrandom2 ,aes(x=timestep,y=N,colour=species, shape=patchtype), show.legend = F) +geom_line(aes(linetype=patchtype), size=1.5)+facet_grid(d~species, labeller = label_both)+xlab("Time")+ylim(0,2500)+ylab("Abundance")+ggtitle("Passive dispersal")+mytheme+ scale_colour_manual(values = c("black", "brown"))
+
+
+
+jpeg("C:/Users/Melissa/Dropbox/Coexistance stuff/Dispersal/passivedisp1.jpeg", width = 6, height = 5, units = 'in', res = 600)
+randommovement2spp
+dev.off()
+
+
+
+
+###
+```
+
+
+```{r fitness movement with varying dispersal}
+
+# Initizalize model setup
+
+patches <- 10 # Number of patches
+species <- 2   # Number of species
+time <- 100	   # Length of time (generations) to run model
+
+results <- array(NA, c(species, patches, time))
+results[,,1] <- 100
+
+
+a <- 1/2000		# Beverton-holt alpha for all species 
+
+# Density independent growth rate R###
+
+meanR=1.6 ###mean growth rate patch ###
+sdR= 0 ### std in growth rate### ##if 0, no variation, if >meanR/2, source sink dynamics####
+SS=2   ###Source sink dynamics##, if 1 no SS, if >2, source sink dynamics#####
+ 
+Rfunc <- function(species, patches, meanR,sdR, SS) {
+	R <- matrix(NA, nrow=species, ncol=patches)
+  R[1, 1:(patches/2)] <- rnorm(patches/2, mean = meanR, sd = sdR)  ###source sp 1 ####
+  R[1, ((patches/2)+1):patches] <- rnorm(patches/2, mean = meanR/SS, sd = sdR)###sink sp 1####
+  R[2, 1:(patches/2)] <- rnorm(patches/2, mean = meanR/SS, sd = sdR) ### sink sp 2 ####
+  R[2, ((patches/2)+1):patches] <- rnorm(patches/2, mean = meanR, sd = sdR)    ## source sp 2 ####
+  return(R)
+}
+
+R<-Rfunc(species,patches,meanR,sdR,SS)
+
+## setting up matrix d vals #### different dispersal rates### (still same between sp 1 and 2)
+##
+
+d_vals2=c(0, 0.05, 0.1, 0.5, 0.9)
+
+d_vals<-as.matrix(rbind(d_vals2, d_vals2))
+
+###bookeeping###
+
+dispnames <- vector("numeric", length=length(d_vals))
+for(i in 1:length(d_vals)){
+  dispnames[i] <- paste("d=", d_vals[i])
+}
+
+speciesnames <- vector("numeric", length=species)
+for(i in 1:species){
+  speciesnames[i] <- paste("species", i)
+}
+
+
+patchnames <- vector("numeric", length=patches)
+for(i in 1:patches){
+  patchnames[i] <- paste("patch", i)
+}
+
+timenames <- vector("numeric", length=time)
+for(i in 1:time){
+  timenames[i] <- paste("timestep", i)
+}
+
+
+###global dispersal###
+
+dispscenariosfitness <- foreach(i=d_vals[1:2,], j=d_vals[,1:length(d_vals2)]) %do% 
+rdetdirected(R,d=c(i,j),a,patches,species,results,time)
+
+
+dispscenariosfitness_2<-array(as.numeric(unlist(dispscenariosfitness )), dim=c(species,patches,time,length(d_vals)), dimnames=list(speciesnames, patchnames, timenames,dispnames)) ##array with labels####
+
+#
+
+```
+
+
+```{r plot time series results fitness-directed movement varying d , echo=FALSE}
+
+###turn array into dataframe###
+
+dispscenariosfitness_df<- as.data.frame.table(dispscenariosfitness_2)
+
+colnames(dispscenariosfitness_df) <- c("species", "patch", "timestep", "d", "N")
+
+dispscenariosfitness_df$species<-as.numeric(dispscenariosfitness_df$species)
+dispscenariosfitness_df$patch<-as.numeric(dispscenariosfitness_df$patch)
+dispscenariosfitness_df$timestep<-as.numeric(dispscenariosfitness_df$timestep)
+dispscenariosfitness_df$d <- with(dispscenariosfitness_df, gsub("d=","", d))
+
+
+##assign R values to patches###
+ 
+species1<-as.numeric(dispscenariosfitness_df$species)
+patch1<-as.numeric(dispscenariosfitness_df$patch)
+
+Rvals <- vector("numeric", length=length(species1))
+for (i in 1:length(species1)){
+   s<-species1[i]
+   p<-patch1[i]
+   Rvals[i]<-c(R[s,p])
+}
+
+
+##merge back to dataframe###
+
+dispscenariosfitness_df_2<-cbind(dispscenariosfitness_df, Rvals)
+
+##column for patch type###
+
+dispscenariosfitness_df_3<-dispscenariosfitness_df_2 %>% mutate(patchtype=ifelse(species==1 & Rvals>mean(dispdatarandom2$Rvals),"Source sp 1 / Sink sp 2", ifelse(species==2 & Rvals < mean(dispdatarandom2$Rvals),"Source sp 1 / Sink sp 2", "Source sp 2 / Sink sp 1")))
+
+###sum across patch types####
+
+sumpatchfitness<-dispscenariosfitness_df_3 %>%
+  group_by(species, timestep, d, patchtype) %>%
+  summarise(N = sum(N))
+
+sumpatchfitness$species=as.factor(sumpatchfitness$species)
+sumpatchfitness$timestep<-as.numeric(sumpatchfitness$timestep)
+
+
+
+##subset##
+sumpatchfitness2<-subset(sumpatchfitness, d==" 0"|d==" 0.05"|d== " 0.5")
+
+
+
+#plot##
+
+
+mytheme<- theme_bw()+ theme(axis.line.x= element_line(colour = "black", size=0.3))+theme(axis.line.y= element_line(colour = "black", size=0.3))+theme(axis.text.x=element_text(size=10, colour = "black"))+theme(axis.text.y=element_text(size=10, colour = "black"))+theme(axis.title=element_text(size=12))+theme(plot.title=element_text(size=12) +theme(plot.title = element_text(hjust = 0.5)))+theme(plot.title = element_text(margin=margin(0,0,5,0)))
+
+
+
+fitnessmovement2spp<-ggplot(sumpatchfitness2 ,aes(x=timestep,y=N,colour=species, shape=patchtype), show.legend = F) +geom_line(aes(linetype=patchtype), size=1.5)+facet_grid(d~species, labeller = label_both)+xlab("Time")+ylab("Abundance")+ggtitle("Fitness-directed dispersal")+mytheme+ scale_colour_manual(values = c("black", "brown"))
+
+
+
+jpeg("C:/Users/Melissa/Dropbox/Coexistance stuff/Dispersal/fitnessdisp1.jpeg", width = 6, height = 5, units = 'in', res = 600)
+fitnessmovement2spp
+dev.off()
+
+
+
+
+###
+```
+
+
+
+```{r dd neg movement with varying dispersal}
+
+# Initizalize model setup
+
+patches <- 10 # Number of patches
+species <- 2   # Number of species
+time <- 100	   # Length of time (generations) to run model
+
+results <- array(NA, c(species, patches, time))
+results[,,1] <- 100
+
+
+a <- 1/2000		# Beverton-holt alpha for all species 
+
+# Density independent growth rate R###
+
+species=2
+patches=10
+meanR=1.6 ###mean growth rate source patch ###
+sdR= 0.00 ### std in growth rate### ##if 0, no variation, if >meanR/2, source sink dynamics####
+p= 2 ### When p = 1, no variation across patches### 
+
+Rfunc <- function(species, patches, meanR,sdR, p) {
+	R <- matrix(NA, nrow=species, ncol=patches)
+  R[1, 1:(patches/2)] <- rnorm(patches/2, mean = ifelse(p<1, meanR+(1-p), meanR), sd = sdR) ###source sp 1 ####
+  R[1, ((patches/2)+1):patches] <- rnorm(patches/2, mean = meanR*p, sd = sdR)###sink sp 1####
+  R[2, 1:(patches/2)] <- rnorm(patches/2, mean = meanR*p, sd = sdR) ### sink sp 2 ####
+  R[2, ((patches/2)+1):patches] <- rnorm(patches/2, mean = ifelse(p<1, meanR+(1-p), meanR), sd = sdR)    ## source sp 2 ####
+  return(R)
+}
+
+Rsourcesink<-Rfunc(species,patches,meanR,sdR,p=0.35)
+
+#Rsource<-Rfunc(species, patches, meanR, sdR, p=0.9)
+
+## setting up matrix d vals #### different dispersal rates### (still same between sp 1 and 2)
+##
+
+d_vals2=c(0, 0.05, 0.1, 0.1325, 0.3775, 0.5, 0.9)
+
+d_vals<-as.matrix(rbind(d_vals2, d_vals2))
+
+###bookeeping###
+
+dispnames <- vector("numeric", length=length(d_vals))
+for(i in 1:length(d_vals)){
+  dispnames[i] <- paste("d=", d_vals[i])
+}
+
+speciesnames <- vector("numeric", length=species)
+for(i in 1:species){
+  speciesnames[i] <- paste("species", i)
+}
+
+
+patchnames <- vector("numeric", length=patches)
+for(i in 1:patches){
+  patchnames[i] <- paste("patch", i)
+}
+
+timenames <- vector("numeric", length=time)
+for(i in 1:time){
+  timenames[i] <- paste("timestep", i )
+}
+
+
+###ddi neg dispersal###
+
+dispddinegvard <- foreach(i=d_vals[1:2,], j=d_vals[,1:length(d_vals2)]) %do% 
+rdetddi(R=Rsourcesink,d=c(i,j),a,patches,species,results,time)
+
+
+dispddinegvard_2<-array(as.numeric(unlist(dispddinegvard)), dim=c(species,patches,time,length(d_vals)), dimnames=list(speciesnames, patchnames, timenames,dispnames)) ##array with labels####
+
+#
+
+```
+
+
+```{r plot time series results dd neg movement varying d , echo=FALSE}
+
+###turn array into dataframe###
+
+dispddinegvard_df<- as.data.frame.table(dispddinegvard_2)
+
+colnames(dispddinegvard_df) <- c("species", "patch", "timestep", "d", "N")
+
+dispddinegvard_df$species<-as.numeric(dispddinegvard_df$species)
+dispddinegvard_df$patch<-as.numeric(dispddinegvard_df$patch)
+dispddinegvard_df$timestep<-as.numeric(dispddinegvard_df$timestep)
+dispddinegvard_df$d <- with(dispddinegvard_df, gsub("d=","", d))
+
+
+##assign R values to patches###
+ 
+species1<-as.numeric(dispddinegvard_df$species)
+patch1<-as.numeric(dispddinegvard_df$patch)
+
+Rvals <- vector("numeric", length=length(species1))
+for (i in 1:length(species1)){
+   s<-species1[i]
+   p<-patch1[i]
+   Rvals[i]<-c(R[s,p])
+}
+
+
+##merge back to dataframe###
+
+dispddinegvard_df_2<-cbind(dispddinegvard_df, Rvals)
+
+##column for patch type###
+
+dispddinegvard_df_3<-dispddinegvard_df_2 %>% mutate(patchtype=ifelse(species==1 & Rvals>mean(dispddinegvard_df_2$Rvals),"Source sp 1 / Sink sp 2", ifelse(species==2 & Rvals < mean(dispddinegvard_df_2$Rvals),"Source sp 1 / Sink sp 2", "Source sp 2 / Sink sp 1")))
+
+###sum across patch types####
+
+sumpatchddnegvard<-dispddinegvard_df_3 %>%
+  group_by(species, timestep, d, patchtype) %>%
+  summarise(N = sum(N))
+
+sumpatchddnegvard$species=as.factor(sumpatchddnegvard$species)
+sumpatchddnegvard$timestep<-as.numeric(sumpatchddnegvard$timestep)
+
+
+
+##subset##
+#sumpatchfitness2<-subset(sumpatchfitness, d==" 0"|d==" 0.05"|d== " 0.5")
+
+
+
+#plot##
+
+
+mytheme<- theme_bw()+ theme(axis.line.x= element_line(colour = "black", size=0.3))+theme(axis.line.y= element_line(colour = "black", size=0.3))+theme(axis.text.x=element_text(size=10, colour = "black"))+theme(axis.text.y=element_text(size=10, colour = "black"))+theme(axis.title=element_text(size=12))+theme(plot.title=element_text(size=12) +theme(plot.title = element_text(hjust = 0.5)))+theme(plot.title = element_text(margin=margin(0,0,5,0)))
+
+
+
+ddinegmovementvard2spp<-ggplot(sumpatchddnegvard ,aes(x=timestep,y=N,colour=species, shape=patchtype), show.legend = F) +geom_line(aes(linetype=patchtype), size=1.5)+facet_grid(d~species, labeller = label_both)+xlab("Time")+ylab("Abundance")+ggtitle("Density-dependent (-) dispersal")+mytheme+ scale_colour_manual(values = c("black", "brown"))
+
+
+
+
+###
+```
+
+
+```{r DD neg movement with varying R}
+
+# Initizalize model setup
+
+patches <- 10 # Number of patches
+species <- 2   # Number of species
+time <- 100	   # Length of time (generations) to run model
+
+results <- array(NA, c(species, patches, time))
+results[,,1] <- 100
+
+
+a <- 1/2000		# Beverton-holt alpha for all species 
+
+# Density independent growth rate R###
+
+
+species=2
+patches=10
+meanR=1.5 ###mean growth rate source patch ###
+sdR= 0.001 ### std in growth rate### ##if 0, no variation, if >meanR/2, source sink dynamics####
+p= 1 ### When p = 1, no variation across patches### 
+
+Rfunc <- function(species, patches, meanR,sdR, p) {
+	R <- matrix(NA, nrow=species, ncol=patches)
+  R[1, 1:(patches/2)] <- rnorm(patches/2, mean = ifelse(p<1, meanR+(1-p), meanR), sd = sdR) ###source sp 1 ####
+  R[1, ((patches/2)+1):patches] <- rnorm(patches/2, mean = meanR*p, sd = sdR)###sink sp 1####
+  R[2, 1:(patches/2)] <- rnorm(patches/2, mean = meanR*p, sd = sdR) ### sink sp 2 ####
+  R[2, ((patches/2)+1):patches] <- rnorm(patches/2, mean = ifelse(p<1, meanR+(1-p), meanR), sd = sdR)    ## source sp 2 ####
+  return(R)
+}
+
+R<-Rfunc(species,patches,meanR,sdR,p)
+
+p_vals=seq(from=1, to=0.33, by=-0.05) ###### mid way point = source sink dynamics###
+
+R_vals=foreach(i=p_vals) %do% Rfunc(species,patches,meanR, sdR, p=c(i))
+
+
+## setting up 
+
+
+###bookeeping###
+
+Rnames <- vector("numeric", length=length(p_vals))
+for(i in 1:length(p_vals)){
+  Rnames[i] <- paste("R=", p_vals[i])
+}
+
+speciesnames <- vector("numeric", length=species)
+for(i in 1:species){
+  speciesnames[i] <- paste("species", i)
+}
+
+
+patchnames <- vector("numeric", length=patches)
+for(i in 1:patches){
+  patchnames[i] <- paste("patch", i)
+}
+
+timenames <- vector("numeric", length=time)
+for(i in 1:time){
+  timenames[i] <- paste("timestep", i)
+}
+
+
+###density dependent (-) movement#####
+
+d=c(0.05, 0.05)
+
+dispddi_varR <- foreach(i=R_vals[]) %do% 
+rdetddi(R=i,d,a,patches,species,results,time)
+
+
+dispddi_varR_2<-array(as.numeric(unlist(dispddi_varR)), dim=c(species,patches,time,length(R_vals)), dimnames=list(speciesnames, patchnames, timenames,Rnames)) ##array with labels####
+
+
+#
+
+```
+
+
+```{r plot time series results DD neg varying R , echo=FALSE}
+
+###turn array into dataframe###
+
+dispddiRdf<- as.data.frame.table(dispddi_varR_2)
+
+colnames(dispddiRdf) <- c("species", "patch", "timestep", "R", "N")
+
+dispddiRdf$species<-as.numeric(dispddiRdf$species)
+dispddiRdf$patch<-as.numeric(dispddiRdf$patch)
+dispddiRdf$timestep<-as.numeric(dispddiRdf$timestep)
+dispddiRdf$R <- with(dispddiRdf, gsub("R=","", R))
+
+dispddiRdf$R<-as.numeric(dispddiRdf$R)
+
+##column for patch type###
+
+####when R >
+
+
+dispddiRdf_2<-dispddiRdf %>% mutate(patchtype=ifelse(R > 0.67, "Source both sp", ifelse(patch <6, "Source sp 1 / Sink sp 2", "Source sp 2 / Sink sp 1")))
+                                                                   
+                                                                   
+
+###sum across patch types####
+
+sumpatchddi_varR<-dispddiRdf_2 %>%
+  group_by(species, timestep, R, patchtype) %>%
+  summarise(N = sum(N))
+
+sumpatchddi_varR$species=as.factor(sumpatchddi_varR$species)
+sumpatchddi_varR$timestep<-as.numeric(sumpatchddi_varR$timestep)
+
+
+
+##subset##
+
+##subset##
+sumpatchddi_varR2<-subset(sumpatchddi_varR, R==1.00|R==0.8|R==0.35)
+
+sumpatchddi_varR2$R=factor(sumpatchddi_varR2$R, levels=c("1", "0.8", "0.35"))
+
+
+#plot##
+
+
+mytheme<- theme_bw()+ theme(axis.line.x= element_line(colour = "black", size=0.3))+theme(axis.line.y= element_line(colour = "black", size=0.3))+theme(axis.text.x=element_text(size=10, colour = "black"))+theme(axis.text.y=element_text(size=10, colour = "black"))+theme(axis.title=element_text(size=12))+theme(plot.title=element_text(size=12) +theme(plot.title = element_text(hjust = 0.5)))+theme(plot.title = element_text(margin=margin(0,0,5,0)))
+
+
+
+ddimovement2spp_varR<-ggplot(sumpatchddi_varR2 ,aes(x=timestep,y=N,colour=species, shape=patchtype), show.legend = F) +geom_line(aes(linetype=patchtype), size=1.5)+facet_grid(R~species, labeller = label_both)+xlab("Time")+ylab("Abundance")+ggtitle("Density-dependent dispersal (-)")+mytheme+ scale_colour_manual(values = c("black", "brown"))+ scale_linetype_manual(values=c("dotted", "solid", "dashed"))
+
+
+jpeg("C:/Users/Melissa/Dropbox/Coexistance stuff/Dispersal/ddnegdisp_varR.jpeg", width = 6, height = 5, units = 'in', res = 600)
+ddimovement2spp_varR
+dev.off()
+
+
+
+
+###
+```
+
+
+```{r dd pos movement with varying dispersal}
+
+# Initizalize model setup
+
+patches <- 10 # Number of patches
+species <- 2   # Number of species
+time <- 100	   # Length of time (generations) to run model
+
+results <- array(NA, c(species, patches, time))
+results[,,1] <- 100
+
+
+a <- 1/2000		# Beverton-holt alpha for all species 
+
+# Density independent growth rate R###
+
+species=2
+patches=10
+meanR=1.6 ###mean growth rate source patch ###
+sdR= 0.00 ### std in growth rate### ##if 0, no variation, if >meanR/2, source sink dynamics####
+p= 2 ### When p = 1, no variation across patches### 
+
+Rfunc <- function(species, patches, meanR,sdR, p) {
+	R <- matrix(NA, nrow=species, ncol=patches)
+  R[1, 1:(patches/2)] <- rnorm(patches/2, mean = ifelse(p<1, meanR+(1-p), meanR), sd = sdR) ###source sp 1 ####
+  R[1, ((patches/2)+1):patches] <- rnorm(patches/2, mean = meanR*p, sd = sdR)###sink sp 1####
+  R[2, 1:(patches/2)] <- rnorm(patches/2, mean = meanR*p, sd = sdR) ### sink sp 2 ####
+  R[2, ((patches/2)+1):patches] <- rnorm(patches/2, mean = ifelse(p<1, meanR+(1-p), meanR), sd = sdR)    ## source sp 2 ####
+  return(R)
+}
+
+Rsourcesink<-Rfunc(species,patches,meanR,sdR,p=0.35)
+
+#Rsource<-Rfunc(species, patches, meanR, sdR, p=0.9)
+
+## setting up matrix d vals #### different dispersal rates### (still same between sp 1 and 2)
+##
+
+d_vals2=c(0, 0.05, 0.1, 0.5, 0.9)
+
+d_vals<-as.matrix(rbind(d_vals2, d_vals2))
+
+###bookeeping###
+
+dispnames <- vector("numeric", length=length(d_vals))
+for(i in 1:length(d_vals)){
+  dispnames[i] <- paste("d=", d_vals[i])
+}
+
+speciesnames <- vector("numeric", length=species)
+for(i in 1:species){
+  speciesnames[i] <- paste("species", i)
+}
+
+
+patchnames <- vector("numeric", length=patches)
+for(i in 1:patches){
+  patchnames[i] <- paste("patch", i)
+}
+
+timenames <- vector("numeric", length=time)
+for(i in 1:time){
+  timenames[i] <- paste("timestep", i )
+}
+
+
+###ddi pos dispersal###
+
+dispddiposvard <- foreach(i=d_vals[1:2,], j=d_vals[,1:length(d_vals2)]) %do% 
+rdetddi_pos(R=Rsourcesink,d=c(i,j),a,patches,species,results,time)
+
+
+dispddiposvard_2<-array(as.numeric(unlist(dispddiposvard)), dim=c(species,patches,time,length(d_vals)), dimnames=list(speciesnames, patchnames, timenames,dispnames)) ##array with labels####
+
+#
+
+```
+
+
+```{r plot time series results dd pos movement varying d , echo=FALSE}
+
+###turn array into dataframe###
+
+dispddiposvard_df<- as.data.frame.table(dispddiposvard_2)
+
+colnames(dispddiposvard_df) <- c("species", "patch", "timestep", "d", "N")
+
+dispddiposvard_df$species<-as.numeric(dispddiposvard_df$species)
+dispddiposvard_df$patch<-as.numeric(dispddiposvard_df$patch)
+dispddiposvard_df$timestep<-as.numeric(dispddiposvard_df$timestep)
+dispddiposvard_df$d <- with(dispddiposvard_df, gsub("d=","", d))
+
+
+##assign R values to patches###
+ 
+species1<-as.numeric(dispddiposvard_df$species)
+patch1<-as.numeric(dispddiposvard_df$patch)
+
+Rvals <- vector("numeric", length=length(species1))
+for (i in 1:length(species1)){
+   s<-species1[i]
+   p<-patch1[i]
+   Rvals[i]<-c(R[s,p])
+}
+
+
+##merge back to dataframe###
+
+dispddiposvard_df_2<-cbind(dispddiposvard_df, Rvals)
+
+##column for patch type###
+
+dispddiposvard_df_3<-dispddiposvard_df_2 %>% mutate(patchtype=ifelse(species==1 & Rvals>mean(dispdatarandom2$Rvals),"Source sp 1 / Sink sp 2", ifelse(species==2 & Rvals < mean(dispdatarandom2$Rvals),"Source sp 1 / Sink sp 2", "Source sp 2 / Sink sp 1")))
+
+###sum across patch types####
+
+sumpatchddposvard<-dispddiposvard_df_3 %>%
+  group_by(species, timestep, d, patchtype) %>%
+  summarise(N = sum(N))
+
+sumpatchddposvard$species=as.factor(sumpatchddposvard$species)
+sumpatchddposvard$timestep<-as.numeric(sumpatchddposvard$timestep)
+
+
+
+##subset##
+#sumpatchfitness2<-subset(sumpatchfitness, d==" 0"|d==" 0.05"|d== " 0.5")
+
+
+
+#plot##
+
+
+mytheme<- theme_bw()+ theme(axis.line.x= element_line(colour = "black", size=0.3))+theme(axis.line.y= element_line(colour = "black", size=0.3))+theme(axis.text.x=element_text(size=10, colour = "black"))+theme(axis.text.y=element_text(size=10, colour = "black"))+theme(axis.title=element_text(size=12))+theme(plot.title=element_text(size=12) +theme(plot.title = element_text(hjust = 0.5)))+theme(plot.title = element_text(margin=margin(0,0,5,0)))
+
+
+
+ddiposmovementvard2spp<-ggplot(sumpatchddposvard ,aes(x=timestep,y=N,colour=species, shape=patchtype), show.legend = F) +geom_line(aes(linetype=patchtype), size=1.5)+facet_grid(d~species, labeller = label_both)+xlab("Time")+ylab("Abundance")+ggtitle("Density-dependent (+) dispersal")+mytheme+ scale_colour_manual(values = c("black", "brown"))
+
+
+
+
+###
+```
+
+
+
+```{r DD pos movement with varying R}
+
+# Initizalize model setup
+
+patches <- 10 # Number of patches
+species <- 2   # Number of species
+time <- 100	   # Length of time (generations) to run model
+
+results <- array(NA, c(species, patches, time))
+results[,,1] <- 100
+
+
+a <- 1/2000		# Beverton-holt alpha for all species 
+
+# Density independent growth rate R###
+
+
+species=2
+patches=10
+meanR=1.5 ###mean growth rate source patch ###
+sdR= 0.001 ### std in growth rate### ##if 0, no variation, if >meanR/2, source sink dynamics####
+p= 1 ### When p = 1, no variation across patches### 
+
+Rfunc <- function(species, patches, meanR,sdR, p) {
+	R <- matrix(NA, nrow=species, ncol=patches)
+  R[1, 1:(patches/2)] <- rnorm(patches/2, mean = ifelse(p<1, meanR+(1-p), meanR), sd = sdR) ###source sp 1 ####
+  R[1, ((patches/2)+1):patches] <- rnorm(patches/2, mean = meanR*p, sd = sdR)###sink sp 1####
+  R[2, 1:(patches/2)] <- rnorm(patches/2, mean = meanR*p, sd = sdR) ### sink sp 2 ####
+  R[2, ((patches/2)+1):patches] <- rnorm(patches/2, mean = ifelse(p<1, meanR+(1-p), meanR), sd = sdR)    ## source sp 2 ####
+  return(R)
+}
+
+R<-Rfunc(species,patches,meanR,sdR,p)
+
+p_vals=seq(from=1, to=0.33, by=-0.05) ###### mid way point = source sink dynamics###
+
+R_vals=foreach(i=p_vals) %do% Rfunc(species,patches,meanR, sdR, p=c(i))
+
+
+## setting up 
+
+
+###bookeeping###
+
+Rnames <- vector("numeric", length=length(p_vals))
+for(i in 1:length(p_vals)){
+  Rnames[i] <- paste("R=", p_vals[i])
+}
+
+speciesnames <- vector("numeric", length=species)
+for(i in 1:species){
+  speciesnames[i] <- paste("species", i)
+}
+
+
+patchnames <- vector("numeric", length=patches)
+for(i in 1:patches){
+  patchnames[i] <- paste("patch", i)
+}
+
+timenames <- vector("numeric", length=time)
+for(i in 1:time){
+  timenames[i] <- paste("timestep", i)
+}
+
+
+###density dependent (-) movement#####
+
+d=c(0.05, 0.05)
+
+dispddipos_varR <- foreach(i=R_vals[]) %do% 
+rdetddi_pos(R=i,d,a,patches,species,results,time)
+
+
+dispddipos_varR_2<-array(as.numeric(unlist(dispddipos_varR)), dim=c(species,patches,time,length(R_vals)), dimnames=list(speciesnames, patchnames, timenames,Rnames)) ##array with labels####
+
+
+#
+
+```
+
+
+```{r plot time series results DD pos varying R , echo=FALSE}
+
+###turn array into dataframe###
+
+dispddiposRdf<- as.data.frame.table(dispddipos_varR_2)
+
+colnames(dispddiposRdf) <- c("species", "patch", "timestep", "R", "N")
+
+dispddiposRdf$species<-as.numeric(dispddiposRdf$species)
+dispddiposRdf$patch<-as.numeric(dispddiposRdf$patch)
+dispddiposRdf$timestep<-as.numeric(dispddiposRdf$timestep)
+dispddiposRdf$R <- with(dispddiposRdf, gsub("R=","", R))
+
+dispddiposRdf$R<-as.numeric(dispddiposRdf$R)
+
+##column for patch type###
+
+####when R >
+
+
+dispddiposRdf_2<-dispddiposRdf %>% mutate(patchtype=ifelse(R > 0.67, "Source both sp", ifelse(patch <6, "Source sp 1 / Sink sp 2", "Source sp 2 / Sink sp 1")))
+                                                                   
+                                                                   
+
+###sum across patch types####
+
+sumpatchddipos_varR<-dispddiposRdf_2 %>%
+  group_by(species, timestep, R, patchtype) %>%
+  summarise(N = sum(N))
+
+sumpatchddipos_varR$species=as.factor(sumpatchddipos_varR$species)
+sumpatchddipos_varR$timestep<-as.numeric(sumpatchddipos_varR$timestep)
+
+
+
+##subset##
+
+##subset##
+sumpatchddipos_varR2<-subset(sumpatchddipos_varR, R==1.00|R==0.8|R==0.35)
+
+sumpatchddipos_varR2$R=factor(sumpatchddipos_varR2$R, levels=c("1", "0.8", "0.35"))
+
+
+#plot##
+
+
+mytheme<- theme_bw()+ theme(axis.line.x= element_line(colour = "black", size=0.3))+theme(axis.line.y= element_line(colour = "black", size=0.3))+theme(axis.text.x=element_text(size=10, colour = "black"))+theme(axis.text.y=element_text(size=10, colour = "black"))+theme(axis.title=element_text(size=12))+theme(plot.title=element_text(size=12) +theme(plot.title = element_text(hjust = 0.5)))+theme(plot.title = element_text(margin=margin(0,0,5,0)))
+
+
+
+ddiposmovement2spp_varR<-ggplot(sumpatchddipos_varR2 ,aes(x=timestep,y=N,colour=species, shape=patchtype), show.legend = F) +geom_line(aes(linetype=patchtype), size=1.5)+facet_grid(R~species, labeller = label_both)+xlab("Time")+ylab("Abundance")+ggtitle("Density-dependent dispersal (+)")+mytheme+ scale_colour_manual(values = c("black", "brown"))+ scale_linetype_manual(values=c("dotted", "solid", "dashed"))
+
+
+jpeg("C:/Users/Melissa/Dropbox/Coexistance stuff/Dispersal/ddposdisp_varR.jpeg", width = 6, height = 5, units = 'in', res = 600)
+ddiposmovement2spp_varR
+dev.off()
+
+
+
+
+###
+```
+
+
+
+
+###### Try creating a heat map of LDGR passive dispersal for different values of d and R ###
+
+
+```{r heat map for random movement}
+
+
+## setting up matrix d vals #### different dispersal rates### (still same between sp 1 and 2)
+
+d_vals2=c(seq(from=0, to=0.95, by=0.05))
+
+#### setting up an array of matrices with different R## From No spatial variation, to lots of spatial variation####
+
+
+species=2
+patches=10
+meanR=1.5 ###mean growth rate source patch ###
+sdR= 0.0 ### std in growth rate### ##if 0, no variation, if >meanR/2, source sink dynamics####
+p= 1 ### When p = 1, no variation across patches### 
+
+Rfunc <- function(species, patches, meanR,sdR, p) {
+	R <- matrix(NA, nrow=species, ncol=patches)
+  R[1, 1:(patches/2)] <- rnorm(patches/2, mean = ifelse(p<1, meanR+(1-p), meanR), sd = sdR) ###source sp 1 ####
+  R[1, ((patches/2)+1):patches] <- rnorm(patches/2, mean = meanR*p, sd = sdR)###sink sp 1####
+  R[2, 1:(patches/2)] <- rnorm(patches/2, mean = meanR*p, sd = sdR) ### sink sp 2 ####
+  R[2, ((patches/2)+1):patches] <- rnorm(patches/2, mean = ifelse(p<1, meanR+(1-p), meanR), sd = sdR)    ## source sp 2 ####
+  return(R)
+}
+
+R<-Rfunc(species,patches,meanR,sdR,p)
+
+p_vals=seq(from=1, to=0.33, by=-0.05) ###### mid way point = source sink dynamics###
+
+R_vals=foreach(i=p_vals) %do% Rfunc(species,patches,meanR, sdR, p=c(i))
+
+
+#####
+
+overall_random <- matrix(NA,nrow=length(R_vals), ncol=length(d_vals2), dimnames=list(p_vals,d_vals2))
+storage_random <- matrix(NA,nrow=length(R_vals), ncol=length(d_vals2),dimnames=list(p_vals,d_vals2))
+fitness_random<- matrix(NA,nrow=length(R_vals), ncol=length(d_vals2),dimnames=list(p_vals,d_vals2))
+nonspatial_random<-matrix(NA,nrow=length(R_vals), ncol=length(d_vals2),dimnames=list(p_vals,d_vals2))
+
+for (x in 1:length(R_vals)) {
+for (y in 1:length(d_vals2)) {
+
+  invader <- 1  # Resident dynamics (all species that are not the invader) run to equilibrium. 
+
+  results <- array(NA, c(species, patches, time))
+	results[,,1] <- 1000
+	results[invader,,1] <- 0 # Remove the invader species from the metacommunity
+	
+	# Running the model to equilibrium without the invader
+	modelRun <- rdet(R_vals[[x]],d_vals2[y],a,patches,species,results,time)
+	
+	# Then run invader to equilibrium spatial distribution, holding the global
+	# abundance to a very low density
+	iabun <- .005*(sum(modelRun[,,time]))
+	invade <- rep(iabun/patches,patches) ##divides equally among the patches##
+	
+	# Set up array to store results with the invader at low density
+	co_results <- array(NA, c(species, patches, time))
+	co_results[,,1] <- modelRun[,,time]
+	co_results[invader,,1] <- invade # species i invades at time step 1
+	
+	modelRunChesson <- rdetChesson(R_vals[[x]],d_vals2[y],a,patches,species,co_results,invader,iabun,time) ##each patch at it's equilibrium densityy##
+	
+	# Now do one more time step, keeeping track of changes in population before vs. after			
+	N_start <- modelRunChesson[,,time] # starting population size
+	N_startj <- N_start[-invader,]     # j is all resident species
+	N_starti <- N_start[invader,]	   # i is invader species
+	
+	# Determine relative abundances
+	v <- matrix(NA, nrow=species, ncol=patches)
+	for (i in 1:species) {
+		v[i,] <- N_start[i,]/mean(N_start[i,])
+	}
+	
+	v_i <- v[invader,]
+	v_j <- v[-invader,]
+	
+	# Determine fitness
+	N_birth <- b(R, N_start, patches, species, a) # Population after 1 time step
+	N_birthi <- N_birth[invader,]
+	N_birthj <- N_birth[-invader,]
+	
+	# Calculate average fitness across the metacommunity
+	R_bar <- rep(NA,species)
+	for (i in 1:species) {
+		R_bar[i] <- mean(R[i,])
+	}
+	
+	R_bari <- R_bar[invader]
+	R_barj <- R_bar[-invader]
+	
+	# Calculate environmental component
+	E <- R/R_bar 
+	Ei <- E[invader,]
+	Ej <- E[-invader,]
+	
+	# Calculate competitive term
+	C <- matrix(NA, nrow=species, ncol=patches) 
+	for (p in 1: patches) {
+		C[,p] <-rep(1-bevHoltC(N_start[,p],a), species)
+	}
+	C <- C[invader,]
+	
+	
+	#Overall invasion criterion
+	lambda_tilde_i <- sum(N_birthi) / sum(N_starti) #Overall global growth rate
+	lambda_i_community_level <- (lambda_tilde_i - 1) / R_bari
+	
+	lambda_tilde_j <- sum(N_birthj) / sum(N_startj) #Overall global growth rate
+	lambda_j_community_level <- (lambda_tilde_j - 1) / R_barj
+
+		# ----------------------------------------------------------------
+	# Components for coexistence, broxen down into the specific mechanisms
+	
+	lambda_tilde_prime <- (1/mean(R_barj))-(1/R_bari) # Non-spatial fitness
+		
+	storageEffect <- -covp( Ei-Ej,C )				  # Storage effect
+	
+	fd1 <- covp( R[invader,]*(1-C), v_i )/R_bari
+	
+	fd2 <- covp( R[-invader,]*(1-C), v_j )/R_barj
+	
+	fitnessDensityCov <- fd1- fd2				 	# Fitness density covariance
+	
+	total <- lambda_tilde_prime + storageEffect + fitnessDensityCov
+	
+# Store results of coexistence mechanisms
+	nonspatial_random[x,y]<-lambda_tilde_prime
+	storage_random[x,y] <- storageEffect
+	fitness_random[x,y] <- fitnessDensityCov
+	overall_random[x,y] <- total
+	#check[x,y] <- (lambda_i_community_level-lambda_j_community_level)
+	
+	# *** NOTE, overall should equal check to ensure that we have accounted for all mechanisms of coexistence***
+}
+}
+
+overall_randomlong<-melt(overall_random)
+
+colnames(overall_randomlong) <- c("R", "d", "LDGR")
+
+
+
+
+
+
+```
+
+
+```{r heat map for fitness directed movement}
+
+overall_directed <- matrix(NA,nrow=length(R_vals), ncol=length(d_vals2), dimnames=list(p_vals,d_vals2))
+storage_directed  <- matrix(NA,nrow=length(R_vals), ncol=length(d_vals2),dimnames=list(p_vals,d_vals2))
+fitness_directed <- matrix(NA,nrow=length(R_vals), ncol=length(d_vals2),dimnames=list(p_vals,d_vals2))
+nonspatial_directed <-matrix(NA,nrow=length(R_vals), ncol=length(d_vals2),dimnames=list(p_vals,d_vals2))
+
+for (x in 1:length(R_vals)) {
+for (y in 1:length(d_vals2)) {
+
+  results <- array(NA, c(species, patches, time))
+	results[,,1] <- 1000
+	results[invader,,1] <- 0 # Remove the invader species from the metacommunity
+	
+	# Running the model to equilibrium without the invader
+	modelRundirected <- rdetdirected(R_vals[[x]],d_vals2[y],a,patches,species,results,time)
+	
+	# Then run invader to equilibrium spatial distribution, holding the global
+	# abundance to a very low density
+	iabun <- .005*(sum(modelRundirected [,,time]))
+	invade <- rep(iabun/patches,patches) ##divides equally among the patches##
+	
+	# Set up array to store results with the invader at low density
+	co_results <- array(NA, c(species, patches, time))
+	co_results[,,1] <- modelRundirected[,,time]
+	co_results[invader,,1] <- invade # species i invades at time step 1
+	
+	modelRunChessondirected <- rdetdirectedChesson(R_vals[[x]],d_vals2[y],a,patches,species,co_results,invader,iabun,time) ##each patch at it's equilibrium densityy##
+	
+	# Now do one more time step, keeeping track of changes in population before vs. after			
+	N_start <- modelRunChessondirected[,,time] # starting population size
+	N_startj <- N_start[-invader,]     # j is all resident species
+	N_starti <- N_start[invader,]	   # i is invader species
+	
+	# Determine relative abundances
+	v <- matrix(NA, nrow=species, ncol=patches)
+	for (i in 1:species) {
+		v[i,] <- N_start[i,]/mean(N_start[i,])
+	}
+	
+	v_i <- v[invader,]
+	v_j <- v[-invader,]
+	
+	# Determine fitness
+	N_birth <- b(R, N_start, patches, species, a) # Population after 1 time step
+	N_birthi <- N_birth[invader,]
+	N_birthj <- N_birth[-invader,]
+	
+	# Calculate average fitness across the metacommunity
+	R_bar <- rep(NA,species)
+	for (i in 1:species) {
+		R_bar[i] <- mean(R[i,])
+	}
+	
+	R_bari <- R_bar[invader]
+	R_barj <- R_bar[-invader]
+	
+	# Calculate environmental component
+	E <- R/R_bar 
+	Ei <- E[invader,]
+	Ej <- E[-invader,]
+	
+	# Calculate competitive term
+	C <- matrix(NA, nrow=species, ncol=patches) 
+	for (p in 1: patches) {
+		C[,p] <-rep(1-bevHoltC(N_start[,p],a), species)
+	}
+	C <- C[invader,]
+	
+	
+	#Overall invasion criterion
+	lambda_tilde_i <- sum(N_birthi) / sum(N_starti) #Overall global growth rate
+	lambda_i_community_level <- (lambda_tilde_i - 1) / R_bari
+	
+	lambda_tilde_j <- sum(N_birthj) / sum(N_startj) #Overall global growth rate
+	lambda_j_community_level <- (lambda_tilde_j - 1) / R_barj
+
+		# ----------------------------------------------------------------
+	# Components for coexistence, broxen down into the specific mechanisms
+	
+	lambda_tilde_prime <- (1/mean(R_barj))-(1/R_bari) # Non-spatial fitness
+		
+	storageEffect <- -covp( Ei-Ej,C )				  # Storage effect
+	
+	fd1 <- covp( R[invader,]*(1-C), v_i )/R_bari
+	
+	fd2 <- covp( R[-invader,]*(1-C), v_j )/R_barj
+	
+	fitnessDensityCov <- fd1- fd2				 	# Fitness density covariance
+	
+	total <- lambda_tilde_prime + storageEffect + fitnessDensityCov
+	
+	
+	
+# Store results of coexistence mechanisms
+	nonspatial_directed[x,y]<-lambda_tilde_prime
+	storage_directed[x,y] <- storageEffect
+	fitness_directed[x,y] <- fitnessDensityCov
+	overall_directed[x,y] <- total
+	#check[x,y] <- (lambda_i_community_level-lambda_j_community_level)
+	
+	# *** NOTE, overall should equal check to ensure that we have accounted for all mechanisms of coexistence***
+}
+}
+
+overall_directedlong<-melt(overall_directed)
+
+colnames(overall_directedlong) <- c("R", "d", "LDGR")
+
+```
+
+
+
+```{r heat map for density dependent (-)  movement}
+
+overall_dd_neg<- matrix(NA,nrow=length(R_vals), ncol=length(d_vals2), dimnames=list(p_vals,d_vals2))
+storage_dd_neg  <- matrix(NA,nrow=length(R_vals), ncol=length(d_vals2),dimnames=list(p_vals,d_vals2))
+fitness_dd_neg <- matrix(NA,nrow=length(R_vals), ncol=length(d_vals2),dimnames=list(p_vals,d_vals2))
+nonspatial_dd_neg <-matrix(NA,nrow=length(R_vals), ncol=length(d_vals2),dimnames=list(p_vals,d_vals2))
+
+for (x in 1:length(R_vals)) {
+for (y in 1:length(d_vals2)) {
+
+  results <- array(NA, c(species, patches, time))
+	results[,,1] <- 1000
+	results[invader,,1] <- 0 # Remove the invader species from the metacommunity
+	
+	# Running the model to equilibrium without the invader
+	modelRunddi <- rdetddi(R_vals[[x]],d_vals2[y],a,patches,species,results,time)
+	
+	# Then run invader to equilibrium spatial distribution, holding the global
+	# abundance to a very low density
+	iabun <- .005*(sum(modelRunddi [,,time]))
+	invade <- rep(iabun/patches,patches) ##divides equally among the patches##
+	
+	# Set up array to store results with the invader at low density
+	co_results <- array(NA, c(species, patches, time))
+	co_results[,,1] <- modelRunddi[,,time]
+	co_results[invader,,1] <- invade # species i invades at time step 1
+	
+	modelRunChessonddi <- rdetddiChesson (R_vals[[x]],d_vals2[y],a,patches,species,co_results,invader,iabun,time) ##each patch at it's equilibrium densityy##
+	
+	# Now do one more time step, keeeping track of changes in population before vs. after			
+	N_start <- modelRunChessonddi[,,time] # starting population size
+	N_startj <- N_start[-invader,]     # j is all resident species
+	N_starti <- N_start[invader,]	   # i is invader species
+	
+	# Determine relative abundances
+	v <- matrix(NA, nrow=species, ncol=patches)
+	for (i in 1:species) {
+		v[i,] <- N_start[i,]/mean(N_start[i,])
+	}
+	
+	v_i <- v[invader,]
+	v_j <- v[-invader,]
+	
+	# Determine fitness
+	N_birth <- b(R, N_start, patches, species, a) # Population after 1 time step
+	N_birthi <- N_birth[invader,]
+	N_birthj <- N_birth[-invader,]
+	
+	# Calculate average fitness across the metacommunity
+	R_bar <- rep(NA,species)
+	for (i in 1:species) {
+		R_bar[i] <- mean(R[i,])
+	}
+	
+	R_bari <- R_bar[invader]
+	R_barj <- R_bar[-invader]
+	
+	# Calculate environmental component
+	E <- R/R_bar 
+	Ei <- E[invader,]
+	Ej <- E[-invader,]
+	
+	# Calculate competitive term
+	C <- matrix(NA, nrow=species, ncol=patches) 
+	for (p in 1: patches) {
+		C[,p] <-rep(1-bevHoltC(N_start[,p],a), species)
+	}
+	C <- C[invader,]
+	
+	
+	#Overall invasion criterion
+	lambda_tilde_i <- sum(N_birthi) / sum(N_starti) #Overall global growth rate
+	lambda_i_community_level <- (lambda_tilde_i - 1) / R_bari
+	
+	lambda_tilde_j <- sum(N_birthj) / sum(N_startj) #Overall global growth rate
+	lambda_j_community_level <- (lambda_tilde_j - 1) / R_barj
+
+		# ----------------------------------------------------------------
+	# Components for coexistence, broxen down into the specific mechanisms
+	
+	lambda_tilde_prime <- (1/mean(R_barj))-(1/R_bari) # Non-spatial fitness
+		
+	storageEffect <- -covp( Ei-Ej,C )				  # Storage effect
+	
+	fd1 <- covp( R[invader,]*(1-C), v_i )/R_bari
+	
+	fd2 <- covp( R[-invader,]*(1-C), v_j )/R_barj
+	
+	fitnessDensityCov <- fd1- fd2				 	# Fitness density covariance
+	
+	total <- lambda_tilde_prime + storageEffect + fitnessDensityCov
+	
+	
+	
+# Store results of coexistence mechanisms
+	nonspatial_dd_neg[x,y]<-lambda_tilde_prime
+	storage_dd_neg[x,y] <- storageEffect
+	fitness_dd_neg[x,y] <- fitnessDensityCov
+	overall_dd_neg[x,y] <- total
+	#check[x,y] <- (lambda_i_community_level-lambda_j_community_level)
+	
+	# *** NOTE, overall should equal check to ensure that we have accounted for all mechanisms of coexistence***
+}
+}
+
+overall_dd_neglong<-melt(overall_dd_neg)
+
+colnames(overall_dd_neglong) <- c("R", "d", "LDGR")
+
+```
+
+
+
+```{r heat map for density dependent (+)  movement}
+
+overall_dd_pos<- matrix(NA,nrow=length(R_vals), ncol=length(d_vals2), dimnames=list(p_vals,d_vals2))
+storage_dd_pos  <- matrix(NA,nrow=length(R_vals), ncol=length(d_vals2),dimnames=list(p_vals,d_vals2))
+fitness_dd_pos <- matrix(NA,nrow=length(R_vals), ncol=length(d_vals2),dimnames=list(p_vals,d_vals2))
+nonspatial_dd_pos <-matrix(NA,nrow=length(R_vals), ncol=length(d_vals2),dimnames=list(p_vals,d_vals2))
+
+for (x in 1:length(R_vals)) {
+for (y in 1:length(d_vals2)) {
+
+  results <- array(NA, c(species, patches, time))
+	results[,,1] <- 1000
+	results[invader,,1] <- 0 # Remove the invader species from the metacommunity
+	
+	# Running the model to equilibrium without the invader
+	modelRunddi_pos <- rdetddi_pos(R_vals[[x]],d_vals2[y],a,patches,species,results,time)
+	
+	# Then run invader to equilibrium spatial distribution, holding the global
+	# abundance to a very low density
+	iabun <- .005*(sum(modelRunddi [,,time]))
+	invade <- rep(iabun/patches,patches) ##divides equally among the patches##
+	
+	# Set up array to store results with the invader at low density
+	co_results <- array(NA, c(species, patches, time))
+	co_results[,,1] <- modelRunddi_pos[,,time]
+	co_results[invader,,1] <- invade # species i invades at time step 1
+	
+	modelRunChessonddi_pos <- rdetddiChesson_pos (R_vals[[x]],d_vals2[y],a,patches,species,co_results,invader,iabun,time) ##each patch at it's equilibrium densityy##
+	
+	# Now do one more time step, keeeping track of changes in population before vs. after			
+	N_start <- modelRunChessonddi_pos[,,time] # starting population size
+	N_startj <- N_start[-invader,]     # j is all resident species
+	N_starti <- N_start[invader,]	   # i is invader species
+	
+	# Determine relative abundances
+	v <- matrix(NA, nrow=species, ncol=patches)
+	for (i in 1:species) {
+		v[i,] <- N_start[i,]/mean(N_start[i,])
+	}
+	
+	v_i <- v[invader,]
+	v_j <- v[-invader,]
+	
+	# Determine fitness
+	N_birth <- b(R, N_start, patches, species, a) # Population after 1 time step
+	N_birthi <- N_birth[invader,]
+	N_birthj <- N_birth[-invader,]
+	
+	# Calculate average fitness across the metacommunity
+	R_bar <- rep(NA,species)
+	for (i in 1:species) {
+		R_bar[i] <- mean(R[i,])
+	}
+	
+	R_bari <- R_bar[invader]
+	R_barj <- R_bar[-invader]
+	
+	# Calculate environmental component
+	E <- R/R_bar 
+	Ei <- E[invader,]
+	Ej <- E[-invader,]
+	
+	# Calculate competitive term
+	C <- matrix(NA, nrow=species, ncol=patches) 
+	for (p in 1: patches) {
+		C[,p] <-rep(1-bevHoltC(N_start[,p],a), species)
+	}
+	C <- C[invader,]
+	
+	
+	#Overall invasion criterion
+	lambda_tilde_i <- sum(N_birthi) / sum(N_starti) #Overall global growth rate
+	lambda_i_community_level <- (lambda_tilde_i - 1) / R_bari
+	
+	lambda_tilde_j <- sum(N_birthj) / sum(N_startj) #Overall global growth rate
+	lambda_j_community_level <- (lambda_tilde_j - 1) / R_barj
+
+		# ----------------------------------------------------------------
+	# Components for coexistence, broxen down into the specific mechanisms
+	
+	lambda_tilde_prime <- (1/mean(R_barj))-(1/R_bari) # Non-spatial fitness
+		
+	storageEffect <- -covp( Ei-Ej,C )				  # Storage effect
+	
+	fd1 <- covp( R[invader,]*(1-C), v_i )/R_bari
+	
+	fd2 <- covp( R[-invader,]*(1-C), v_j )/R_barj
+	
+	fitnessDensityCov <- fd1- fd2				 	# Fitness density covariance
+	
+	total <- lambda_tilde_prime + storageEffect + fitnessDensityCov
+	
+	
+	
+# Store results of coexistence mechanisms
+	nonspatial_dd_pos[x,y]<-lambda_tilde_prime
+	storage_dd_pos[x,y] <- storageEffect
+	fitness_dd_pos[x,y] <- fitnessDensityCov
+	overall_dd_pos[x,y] <- total
+	#check[x,y] <- (lambda_i_community_level-lambda_j_community_level)
+	
+	# *** NOTE, overall should equal check to ensure that we have accounted for all mechanisms of coexistence***
+}
+}
+
+overall_dd_poslong<-melt(overall_dd_pos)
+
+colnames(overall_dd_poslong) <- c("R", "d", "LDGR")
+
+```
+
+
+```{r merge data and plot}
+
+overall_randomlong2<-overall_randomlong %>% mutate(scenario = "Passive dispersal")
+
+overall_directedlong2<-overall_directedlong %>% mutate(scenario = "Fitness-directed dispersal")
+
+overall_dd_neglong2<-overall_dd_neglong%>% mutate(scenario = "Density-dependent (-) dispersal")
+
+overall_dd_poslong2<-overall_dd_poslong%>% mutate(scenario = "Density-dependent (+) dispersal")
+
+
+overall_all<-rbind(overall_randomlong2, overall_directedlong2, overall_dd_neglong2, overall_dd_poslong2)
+
+levels(overall_all$scenario) <- c("Passive dispersal", "Fitness-directed dispersal", "Density-dependent (-) dispersal", "Density-dependent (+) dispersal")
+
+
+###plot###
+
+mytheme<- theme_bw()+ theme(axis.line.x= element_line(colour = "black", size=0.3))+theme(axis.line.y= element_line(colour = "black", size=0.3))+theme(axis.text.x=element_text(size=10, colour = "black"))+theme(axis.text.y=element_text(size=10, colour = "black"))+theme(axis.title=element_text(size=12))+theme(plot.title=element_text(size=7) +theme(plot.title = element_text(hjust = 0.5)))+ theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+theme(plot.title = element_text(margin=margin(0,0,5,0)))
+
+
+
+####make all figures like this one####
+
+heat_all<-ggplot(overall_all, aes(x=R, y=d, fill=LDGR)) + 
+  geom_tile() + 
+  facet_rep_wrap(~factor(scenario, levels=c("Passive dispersal", "Fitness-directed dispersal", "Density-dependent (-) dispersal", "Density-dependent (+) dispersal")), ncol=2 , repeat.tick.labels=TRUE)+
+  scale_fill_gradient2(limit = c(0.01,max(overall_all$LDGR)))+
+  xlab("Spatial variation in growth rate")+
+  ylab("Dispersal rate") +mytheme+scale_x_reverse(breaks=c(0.33, 0.67, 1)) + scale_y_continuous(breaks=c(0,0.5,1))+ theme(strip.text.x = element_text(size = 15))+ theme( strip.background = element_blank() )
+
+
+jpeg("C:/Users/Melissa/Dropbox/Coexistance stuff/Dispersal/heatmaps4panels.jpeg", width = 8, height = 6, units = 'in', res = 600)
+heat_all
+dev.off()
+
+
+
+```
+

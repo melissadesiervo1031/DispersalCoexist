@@ -1,0 +1,617 @@
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(foreach)
+library(som.nn)
+library(mcomsimr)
+```
+
+
+
+Function definition calculate the population covariance ##
+
+
+```{r function pop covariance}
+
+
+
+# Function to calculate the population covariance (i.e. not an unbiased
+# sample covariance with denominator n-1, which is the default in R).
+covp <- function(x,y){
+	n <- length(x)
+	return( (n-1) * cov(x,y) / n )
+}
+
+
+```
+
+
+Function definition for Beverton-Holt competition growth model##
+
+
+```{r function BV holt growth}
+
+
+##N = pop size##
+## a = competition coefficient####
+
+# Function definition for Beverton-Holt competition
+bevHoltC <- function(N,a) {
+	return( 1 / ( 1 + a*(sum(N))))
+}
+
+###represent per capita pop growth w competition from self and other spp### 
+
+##need to multiply this by R (intrinsic pop growth rate) to get Nt+1###
+
+```
+
+
+
+Function definition for deterministic pop growth##
+
+
+```{r function population growth}
+
+
+## a = competition coefficients####
+## R = intrinsic population growth rate###
+
+
+
+b <- function(R,current, patches, species, a) {
+	birth <- matrix(NA, nrow=species, ncol=patches)
+	for (p in 1:patches) {
+		birth[,p] <- R[,p]*current[,p]*bevHoltC(current[,p],a)
+	}
+	return(birth)
+}
+
+```
+
+
+
+Function definition deterministic model run BV holt pop growth and random movement btwn patches #
+
+```{r model function definition random movement (Shoemaker 2016)}
+
+# Function definition for deterministic model run ### random movement between patches##
+
+
+rdet <- function(R,d,a,patches,species,data,time) {
+	
+	for (t in 1:(time-1)){
+		
+		# Number of individuals in each patch after pop growth but before dispersal###
+		birth <- b(R, data[,,t],patches, species, a)
+		
+		# dispersal
+		migrate <- d*birth
+		stay <- birth - migrate
+		
+		totalmigrate <- rep (NA, species)
+		for (s in 1:species) {
+			totalmigrate[s] <- sum(migrate[s,])
+		}
+		
+		# determine where each individual migrates
+		migratelocation <- matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+			migratelocation[s,] <- rep(totalmigrate[s]/patches, patches)
+		}
+		
+		# Number of individuals in each patch after individuals have moved
+		data[,,t+1] <- stay + migratelocation	
+		
+	}
+return(data)
+}
+
+
+
+
+
+
+```
+
+
+Function definition for deterministic model run for determining Chessonian coexistence
+
+```{r model function definition Chessonian coexistence (random movement)}
+
+# Function definition for deterministic model run for determining Chessonian coexistence 
+# (neutral, species sorting, or mass effects)
+rdetChesson <- function(R,d,a,patches,species,data,invader,invadeTotal,time) {
+	
+	for (t in 1:(time-1)){
+		
+		# birth
+		
+		birth <- b(R, data[,,t],patches, species, a)
+		
+		# dispersal
+		migrate <- d*birth
+		stay <- birth - migrate
+		
+		totalmigrate <- rep (NA, species)
+		for (s in 1:species) {
+			totalmigrate[s] <- sum(migrate[s,])
+		}
+		
+		# determine where each individual migrates
+		migratelocation <- matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+			migratelocation[s,] <- rep(totalmigrate[s]/patches, patches)
+		}
+		
+		# Determine number of individuals in each patch
+		data[,,t+1] <- stay + migratelocation	
+
+		
+		# Reset the invader
+		data[invader,,t+1] <- data[invader,,t+1] / sum(data[invader,,t+1]) * invadeTotal
+		
+	}
+return(data)
+}
+
+
+```
+
+
+Function definition deterministic model run fitness-directed dispersal (disp is a function of R) #
+
+```{r model function definition fitness-directed movement global}
+
+# Function definition for deterministic model run ### fitness-dependent movement between patches##
+
+rdetdirected <- function(R,d,a,pref,patches,species,data,time) {
+	
+	for (t in 1:(time-1)){
+		
+		# Number of individuals in each patch before dispersal###
+		birth <- b(R, data[,,t],patches, species, a)
+		
+		# dispersal
+		migrate <- d*birth
+		stay <- birth - migrate
+		
+		totalmigrate <- rep (NA, species)
+		for (s in 1:species) {
+			totalmigrate[s] <- sum(migrate[s,])
+		}
+		
+		# probability of dispersing to that patch depends on R ###
+		probpatch <- matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+			 for(p in 1:patches){
+		  probpatch[s,p] <- exp(pref*R[s,p])  ### probability of going to patch exponential to R (pref = preference of that patch (positive constant))####
+			 }
+		}
+		
+		# determine where each individual migrates
+		migratelocation <- matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+			 for(p in 1:patches){
+		  migratelocation[s,p] <- (probpatch[s,p]*totalmigrate[s])/sum(probpatch[s,])
+			 }
+		}
+		
+		
+		# Number of individuals in each patch after individuals have moved
+		data[,,t+1] <- stay + migratelocation	
+		
+	}
+return(data)
+}
+
+
+
+
+
+
+```
+
+
+
+
+```{r model function definition fitness-directed movement global tweaked version}
+
+# Function definition for deterministic model run ### fitness-dependent movement between patches##
+
+rdetdirected <- function(R,d,a,pref,patches,species,data,time) {
+	
+	for (t in 1:(time-1)){
+		
+		# Number of individuals in each patch before dispersal###
+		birth <- b(R, data[,,t],patches, species, a)
+		
+		# dispersal
+		migrate <- d*birth
+		stay <- birth - migrate
+		
+		totalmigrate <- rep (NA, species)
+		for (s in 1:species) {
+			totalmigrate[s] <- sum(migrate[s,])
+		}
+		
+		# probability of dispersing to that patch depends on R ###
+		probpatch <- matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+			 for(p in 1:patches){
+		  probpatch[s,p] <- exp(pref*R[s,p])/sum(exp(pref*R[s,]))  ### probability of going to patch exponential to R (pref = preference of that patch (positive constant))####
+			 }
+		}
+		
+		# determine where each individual migrates
+		migratelocation <- matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+			 for(p in 1:patches){
+		  migratelocation[s,p] <- (probpatch[s,p]*totalmigrate[s])
+			 }
+		}
+		
+		
+		# Number of individuals in each patch after individuals have moved
+		data[,,t+1] <- stay + migratelocation	
+		
+	}
+return(data)
+}
+
+
+
+
+
+
+```
+
+
+
+
+Function definition for deterministic model run for determining Chessonian coexistence: fitness-directed dispersal
+
+###fix this to incorporate pref from above### 
+
+```{r model function definition Chessonian coexistence fitness-directed movement}
+
+# Function definition for deterministic model run for determining Chessonian coexistence 
+# (neutral, species sorting, or mass effects)
+rdetdirectedChesson <- function(R,d,a,patches,species,data,invader,invadeTotal,time) {
+	
+	for (t in 1:(time-1)){
+		
+		# birth
+		
+		birth <- b(R, data[,,t],patches, species, a)
+		
+		# dispersal
+		migrate <- d*birth
+		stay <- birth - migrate
+		
+		totalmigrate <- rep (NA, species)
+		for (s in 1:species) {
+			totalmigrate[s] <- sum(migrate[s,])
+		}
+		
+		
+		# probability of dispersing to that patch depends on R ###
+		probpatch <- matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+			 for(p in 1:patches){
+		  probpatch[s,p] <- exp(5*R[s,p])  ### probability of going to patch exponential to R (5 is arbitrary)####
+			 }
+		}
+		
+		# determine where each individual migrates
+		migratelocation <- matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+			 for(p in 1:patches){
+		  migratelocation[s,p] <- (probpatch[s,p]*totalmigrate[s])/sum(probpatch[s,])
+			 }
+		}
+		
+		# Determine number of individuals in each patch
+		data[,,t+1] <- stay + migratelocation	
+
+		
+		# Reset the invader
+		data[invader,,t+1] <- data[invader,,t+1] / sum(data[invader,,t+1]) * invadeTotal
+		
+	}
+return(data)
+}
+
+
+```
+
+
+
+Function definition deterministic model # immigrants depends on density of patch (dd -) #
+
+
+```{r model function definition density-dependent (-) immigration, prob D}
+
+# Function definition for deterministic model run ### negative density-dependent immigration between patches##
+
+
+rdetddi <- function(R,d,a,patches,species,data,time) {
+	
+	for (t in 1:(time-1)){
+		
+		# Number of individuals in each patch after pop growth but before dispersal###
+		birth <- b(R, data[,,t],patches, species, a)
+   	birth[is.na(birth)] <- 0
+		
+		# dispersal
+		migrate <- d*birth
+		stay <- birth - migrate
+		
+		##total number of each spp migrating###
+		totalmigrate <- rep (NA, species)
+		for (s in 1:species) {
+			totalmigrate[s] <- sum(migrate[s,])
+		}
+		
+
+		# probability of dispersing to that patch depends on density of individuals staying ###
+		probpatch <- matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+			 for(p in 1:patches){
+		  probpatch[s,p] <- exp(-1*5*stay[s,p]/sum(stay[s,]))  ### neg exp of density #
+			 }
+		}
+		
+		# determine where each individual migrates
+		migratelocation <- matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+			 for(p in 1:patches){
+		  migratelocation[s,p] <- (probpatch[s,p]*totalmigrate[s])/sum(probpatch[s,])
+			 }
+		}
+		
+		
+		
+		# Number of individuals in each patch after individuals have moved
+		data[,,t+1] <- stay + migratelocation	
+		data[,,t+1][is.na(data[,,t+1])] <- 0
+		
+	}
+return(data)
+}
+
+
+
+
+
+```
+
+Function definition deterministic model run for determining Chessonian coexistence:# immigrants depends on density of patch (dd - ) #
+
+
+```{r model function definition Chessonian coexistence density-dependent (-) immigration}
+
+# Function definition for deterministic model run for determining Chessonian coexistence 
+# (neutral, species sorting, or mass effects)
+rdetddiChesson <- function(R,d,a,patches,species,data,invader,invadeTotal,time) {
+	
+	for (t in 1:(time-1)){
+		
+		# birth
+		
+		birth <- b(R, data[,,t],patches, species, a)
+		birth[is.na(birth)] <- 0
+		
+		# dispersal
+		migrate <- d*birth
+		stay <- birth - migrate
+		
+		totalmigrate <- rep (NA, species)
+		for (s in 1:species) {
+			totalmigrate[s] <- sum(migrate[s,])
+		}
+		
+		
+			# probability of dispersing to that patch depends on density of individuals staying ###
+		probpatch <- matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+			 for(p in 1:patches){
+		  probpatch[s,p] <- exp(-1*5*stay[s,p]/sum(stay[s,]))  ### neg exp of density ####
+			 }
+		}
+		
+		# determine where each individual migrates
+		migratelocation <- matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+			 for(p in 1:patches){
+		  migratelocation[s,p] <- (probpatch[s,p]*totalmigrate[s])/sum(probpatch[s,])
+			 }
+		}
+		
+		
+		# Number of individuals in each patch after individuals have moved
+		data[,,t+1] <- stay + migratelocation	
+    data[,,t+1][is.na(data[,,t+1])] <- 0
+		
+		# Reset the invader
+		data[invader,,t+1] <- data[invader,,t+1] / sum(data[invader,,t+1]) * invadeTotal
+		
+	}
+return(data)
+}
+
+
+```
+
+
+Function definition deterministic model # immigrants depends on density of patch (dd +) #
+
+
+```{r model function definition density-dependent (+) immigration, prob D}
+
+# Function definition for deterministic model run ### negative density-dependent immigration between patches##
+
+
+rdetddi_pos <- function(R,d,a,patches,species,data,time) {
+	
+	for (t in 1:(time-1)){
+		
+		# Number of individuals in each patch after pop growth but before dispersal###
+		birth <- b(R, data[,,t],patches, species, a)
+   	birth[is.na(birth)] <- 0
+		
+		# dispersal
+		migrate <- d*birth
+		stay <- birth - migrate
+		
+		##total number of each spp migrating###
+		totalmigrate <- rep (NA, species)
+		for (s in 1:species) {
+			totalmigrate[s] <- sum(migrate[s,])
+		}
+		
+
+		# probability of dispersing to that patch depends on density of individuals staying ###
+		probpatch <- matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+			 for(p in 1:patches){
+		  probpatch[s,p] <- exp(5*stay[s,p]/sum(stay[s,]))  ### positive exp of density #
+			 }
+		}
+		
+		# determine where each individual migrates
+		migratelocation <- matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+			 for(p in 1:patches){
+		  migratelocation[s,p] <- (probpatch[s,p]*totalmigrate[s])/sum(probpatch[s,])
+			 }
+		}
+		
+		
+		
+		# Number of individuals in each patch after individuals have moved
+		data[,,t+1] <- stay + migratelocation	
+		data[,,t+1][is.na(data[,,t+1])] <- 0
+		
+	}
+return(data)
+}
+
+
+
+
+
+```
+
+
+
+```{r model function definition Chessonian coexistence density-dependent (+) immigration}
+
+# Function definition for deterministic model run for determining Chessonian coexistence 
+# (neutral, species sorting, or mass effects)
+rdetddiChesson_pos <- function(R,d,a,patches,species,data,invader,invadeTotal,time) {
+	
+	for (t in 1:(time-1)){
+		
+		# birth
+		
+		birth <- b(R, data[,,t],patches, species, a)
+		birth[is.na(birth)] <- 0
+		
+		# dispersal
+		migrate <- d*birth
+		stay <- birth - migrate
+		
+		totalmigrate <- rep (NA, species)
+		for (s in 1:species) {
+			totalmigrate[s] <- sum(migrate[s,])
+		}
+		
+		
+			# probability of dispersing to that patch depends on density of individuals staying ###
+		probpatch <- matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+			 for(p in 1:patches){
+		  probpatch[s,p] <- exp(5*stay[s,p]/sum(stay[s,]))  ### postivie exp of density ####
+			 }
+		}
+		
+		# determine where each individual migrates
+		migratelocation <- matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+			 for(p in 1:patches){
+		  migratelocation[s,p] <- (probpatch[s,p]*totalmigrate[s])/sum(probpatch[s,])
+			 }
+		}
+		
+		
+		# Number of individuals in each patch after individuals have moved
+		data[,,t+1] <- stay + migratelocation	
+    data[,,t+1][is.na(data[,,t+1])] <- 0
+		
+		# Reset the invader
+		data[invader,,t+1] <- data[invader,,t+1] / sum(data[invader,,t+1]) * invadeTotal
+		
+	}
+return(data)
+}
+
+
+```
+
+
+
+```{r plot results random movement , echo=FALSE}
+
+###turn array into dataframe###
+
+dispdatarandom <- as.data.frame.table(dispscenariosrandom122)
+
+colnames(dispdatarandom) <- c("species", "patch", "timestep", "d", "N")
+
+dispdatarandom$species<-as.numeric(dispdatarandom$species)
+dispdatarandom$patch<-as.numeric(dispdatarandom$patch)
+dispdatarandom$timestep<-as.numeric(dispdatarandom$timestep)
+dispdatarandom$d <- with(dispdatarandom, gsub("d=","", d))
+
+
+##assign R values to patches###
+ 
+species1<-as.numeric(dispdatarandom$species)
+patch1<-as.numeric(dispdatarandom$patch)
+
+Rvals <- vector("numeric", length=length(species1))
+for (i in 1:length(species1)){
+   s<-species1[i]
+   p<-patch1[i]
+   Rvals[i]<-c(R[s,p])
+}
+
+
+##merge back to dataframe###
+
+dispdatarandom2<-cbind(dispdatarandom, Rvals)
+
+##column for patch type###
+
+dispdatarandom3<-dispdatarandom2 %>% mutate(patchtype=ifelse(species==1 & Rvals>mean(dispdatarandom2$Rvals),"Source sp 1 / Sink sp 2", ifelse(species==2 & Rvals < mean(dispdatarandom2$Rvals),"Source sp 1 / Sink sp 2", "Source sp 2 / Sink sp 1")))
+
+###sum across patch types####
+
+sumpatchrandom<-dispdatarandom3 %>%
+  group_by(species, patch, timestep, d, patchtype) %>%
+  summarise(N = sum(N))
+
+sumpatchrandom$species=as.factor(sumpatchrandom$species)
+sumpatchrandom$timestep<-as.numeric(sumpatchrandom$timestep)
+
+#plot##
+randommovement2spp<-ggplot(sumpatchrandom ,aes(x=timestep,y=N,colour=species, shape=patchtype), show.legend = F) +geom_line(aes(linetype=patchtype), size=1.5)+facet_grid(d~species, labeller = label_both)+xlab("Time")+ylab("Abundance")+ggtitle("Passive dispersal btwn patches")
+
+
+###
+```
+
+
