@@ -1,0 +1,395 @@
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(foreach)
+library(som.nn)
+library(mcomsimr)
+devtools::install_github("plthompson/mcomsimr")
+```
+
+
+
+```{r spatially explicit dispersal practice}
+###
+
+patches <- 36 # Number of patches..needs to be an even square (6 X 6)
+
+##patches in landscape form, with x and y coordinates ##
+
+dimx<-sqrt(patches)
+patchnums<-seq(from = 1, to = dimx)
+
+x<- rep(patchnums, times=dimx)
+y<- rep(patchnums, each=dimx)
+
+mylandscape<-cbind(x,y)
+
+plot(y ~ x, mylandscape) ##my landscape###
+
+###distance from each patch to each other patch in a torus##
+
+dist_matMC <- as.matrix(dist.torus(coors = mylandscape)) ##t distances between each patch to each other patch##
+
+##slope of the dispersal kernel##
+w=0.1
+
+######
+
+species <- 2   # Number of species
+time <- 100	   # Length of time (generations) to run model
+
+results <- array(NA, c(species, patches, time))
+results[,,1] <- 1000
+
+
+# Model parameterization 
+d <- c(.05, .05) # Dispersal rates for each species
+
+a <- 1/2000		# Beverton-holt alpha for all species 
+
+# Density independent growth rate that varies among patches###
+R <- matrix(NA, nrow=species, ncol=patches)
+R[1, 1:(patches/2)] <- 1.6
+R[1, ((patches/2)+1):patches] <- 1.3
+R[2, 1:(patches/2)] <- 1.25
+R[2, ((patches/2)+1):patches] <- 1.65
+
+###
+w = 0.5  ###dispersal kernel the exponential rate at which dispersal decreases as a function of the distance between patches ###
+
+rdetlandscape <- function(R,d,a,patches,species,data,time, w) {
+	
+	for (t in 1:(time-1)){
+		
+		# Number of individuals in each patch before dispersal###
+		birth <- b(R, data[,,t],patches, species, a)
+		
+		# total number of individuals to leave and stay in the patch##
+		migrate <- d*birth
+		stay <- birth - migrate
+		
+	  ##total migrants of each spp##
+		totalmigrate <- rep (NA, species)
+		for (s in 1:species) {
+		totalmigrate[s] <- sum(migrate[s,])
+		}
+		
+		# probability of dispersing to each patch based on disp kernel###
+		dispprob <- array(NA, c(patches, patches, species))
+		dispprob1 <- array(NA, c(patches, patches, species))
+		for (s in 1:species) {
+		   dispprob1[,,s] <- exp(-1*w*dist_matMC)  ## dispersal kernel ###
+		   diag(dispprob1[,,s]) <- 0  #### make diag 0, so migraters can't stay in same patch##
+		   dispprob[,,s] <- apply(dispprob1[,,s], 1, function(x) x/sum(x)) ###divide by the sum of each row so probability adds up to 1 ###
+		}
+		
+				# determine where each individual migrates 
+		### this works!!!###
+		migratelocationbypatch=array(NA, c(patches, patches, species))
+		for (s in 1:species) {
+		  for (p in 1:patches){
+		   migratelocationbypatch[p,,s] <-  migrate[s,p] %*% dispprob[p,,s]
+		  }
+		}
+		
+		##total number of immigrants in each patch after dispersal##
+
+		migratelocation=matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+		   migratelocation[s,] <-  colSums(migratelocationbypatch[,,s])
+		 }
+
+		# Number of individuals in each patch after individuals have moved
+		data[,,t+1] <- stay + migratelocation	
+		
+	}
+return(data)
+}
+
+
+
+
+
+```
+
+
+
+```{r spatially explicit dispersal practice 2}
+###
+
+patches <- 36 # Number of patches..needs to be an even square (6 X 6)
+
+##patches in landscape form, with x and y coordinates ##
+
+dimx<-sqrt(patches)
+patchnums<-seq(from = 1, to = dimx)
+
+x<- rep(patchnums, times=dimx)
+y<- rep(patchnums, each=dimx)
+
+mylandscape<-cbind(x,y)
+
+plot(y ~ x, mylandscape) ##my landscape###
+
+###distance from each patch to each other patch in a torus##
+
+dist_matMC <- as.matrix(dist.torus(coors = mylandscape)) ##t distances between each patch to each other patch##
+
+##slope of the dispersal kernel##
+w=0.1
+
+######
+
+species <- 2   # Number of species
+time <- 100	   # Length of time (generations) to run model
+
+results <- array(NA, c(species, patches, time))
+results[,,1] <- 1000
+
+
+# Model parameterization 
+d <- c(.05, .05) # Dispersal rates for each species
+
+a <- 1/2000		# Beverton-holt alpha for all species 
+
+# Density independent growth rate that varies among patches###
+R <- matrix(NA, nrow=species, ncol=patches)
+R[1, 1:(patches/2)] <- 1.6
+R[1, ((patches/2)+1):patches] <- 1.3
+R[2, 1:(patches/2)] <- 1.25
+R[2, ((patches/2)+1):patches] <- 1.65
+
+
+dispkern=0.1 #steepness of the dispersal kernel ##
+
+#Disp_array function modified ##
+
+generate_dispersal_matrices_mod <- function(landscape, species, 
+                                        patches = patches, dispkern,
+                                        torus = TRUE){
+  
+  if(torus == TRUE){
+    dist_mat <- as.matrix(som.nn::dist.torus(coors = landscape))
+  } else {
+    dist_mat <- as.matrix(dist(landscape))
+  }
+  
+  disp_array <- array(dim = c(patches, patches, species))
+  for(k in 1:species){
+    spec_dist_mat <- exp(-1*dispkern*dist_mat) 
+    diag(spec_dist_mat) <- 0  #### make diag 0, so migraters can't stay in same patch##
+    # next, make all cols sum to 1
+    disp_array[,,k] <- apply(spec_dist_mat, 1, function(x) x / sum(x))
+    if (sum(colSums(disp_array[,,k]) > 1.001) > 0) warning (
+      "dispersal from a patch to all others exceeds 100%. 
+      Make sure the rowSums(disp_mat) <= 1")
+    if (sum(colSums(disp_array[,,k]) < 0.999) > 0) warning (
+      "dispersal from a patch to all others is less than 100%. 
+      Some dispersing individuals will be lost from the metacommunity")
+  }
+  
+  return(disp_array)
+  
+
+  }
+
+
+
+
+
+##nathan Disp_array function ##
+
+generate_dispersal_matrices <- function(landscape, species, 
+                                        patches = patches, 
+                                        species_traits, torus = TRUE){
+  
+  if(torus == TRUE){
+    dist_mat <- as.matrix(som.nn::dist.torus(coors = landscape))
+  } else {
+    dist_mat <- as.matrix(dist(landscape))
+  }
+  
+  disp_array <- array(dim = c(patches, patches, species))
+  for(k in 1:species){
+    spec_dist_mat <- exp(-species_traits[k,"kernel_exp"] * dist_mat)
+    # next, make all cols sum to 1
+    disp_array[,,k] <- apply(spec_dist_mat, 1, function(x) x / sum(x))
+    if (sum(colSums(disp_array[,,k]) > 1.001) > 0) warning (
+      "dispersal from a patch to all others exceeds 100%. 
+      Make sure the rowSums(disp_mat) <= 1")
+    if (sum(colSums(disp_array[,,k]) < 0.999) > 0) warning (
+      "dispersal from a patch to all others is less than 100%. 
+      Some dispersing individuals will be lost from the metacommunity")
+  }
+  
+  return(disp_array)
+  
+
+  }
+
+
+```
+
+
+
+
+```{r dispersal kernel function }
+###
+
+dispkern=0.1 #steepness of the dispersal kernel ##
+
+#Disp_array function modified ##
+
+generate_dispersal_matrices<- function(landscape, species, 
+                                        patches = patches, dispkern,
+                                        torus = TRUE){
+  
+  if(torus == TRUE){
+    dist_mat <- as.matrix(som.nn::dist.torus(coors = landscape))
+  } else {
+    dist_mat <- as.matrix(dist(landscape))
+  }
+  
+  disp_array <- array(dim = c(patches, patches, species))
+  for(k in 1:species){
+    spec_dist_mat <- exp(-1*dispkern*dist_mat) 
+    diag(spec_dist_mat) <- 0  #### make diag 0, so migraters can't stay in same patch##
+    # next, make all cols sum to 1
+    disp_array[,,k] <- apply(spec_dist_mat, 1, function(x) x / sum(x))
+    if (sum(colSums(disp_array[,,k]) > 1.001) > 0) warning (
+      "dispersal from a patch to all others exceeds 100%. 
+      Make sure the rowSums(disp_mat) <= 1")
+    if (sum(colSums(disp_array[,,k]) < 0.999) > 0) warning (
+      "dispersal from a patch to all others is less than 100%. 
+      Some dispersing individuals will be lost from the metacommunity")
+  }
+  
+  return(disp_array)
+  
+
+  }
+
+
+
+```
+
+
+
+
+```{r make landscape w/ dens independent growth rate function }
+###
+
+patches <- 36 # Number of patches..needs to be an even square (6 X 6)
+
+#Disp_array function modified ##
+
+generate_landscape_growthrate<- function(Rmax, species, patches){
+  
+  ##patches in landscape form, with x and y coordinates ##
+
+    dimx<-sqrt(patches)
+    patchnums<-seq(from = 1, to = dimx)
+
+    x<- rep(patchnums, times=dimx)
+    y<- rep(patchnums, each=dimx)
+
+    mylandscape<-cbind(x,y)
+    
+    R <- matrix(NA, nrow=species, ncol=patches)
+    R[1, sample.int(patches, patches/2, replace = FALSE)] <- Rmax ## 
+    R[2,is.na(R[1,])] <- Rmax-(Rmax/patches)
+    R[1,is.na(R[1,])] <- Rmax-Rmax/4-Rmax/patches
+    R[2,is.na(R[2,])] <- Rmax-Rmax/4
+    
+    mylandscapeR=cbind.data.frame(mylandscape, Rsp1=R[1,])
+    
+     g<-ggplot(mylandscapeR, aes(x=x, y=y, size=as.factor(round(Rsp1, digits=2))))+geom_point()+theme_bw()+theme(legend.title=element_blank())
+     
+     print(g)
+    
+  return(R)
+
+
+  }
+
+
+
+
+```
+
+
+
+```{r spatially explicit dispersal practice 3}
+
+###
+
+patches <- 36 # Number of patches..needs to be an even square (6 X 6)
+species <- 2   # Number of species
+time <- 100	   # Length of time (generations) to run model
+
+results <- array(NA, c(species, patches, time))
+results[,,1] <- 1000
+
+
+# Model parameterization 
+d <- c(.05, .05) # Dispersal rates for each species
+
+a <- 1/2000		# Beverton-holt alpha for all species 
+
+dispkern=0.1 #steepness of the dispersal kernel ##
+
+####### The whole simulation w/ random localized dispersal ####
+
+rdetkernel <- function(Rmax,d,a,dispkern, patches,species,data,time) {
+	
+	for (t in 1:(time-1)){
+	  
+	  #make landscape ###
+	  
+	  mylandscape<-generate_landscape_growthrate(Rmax, species, patches)
+		
+		# Number of individuals in each patch before dispersal (time t + h)###
+		birth <- b(R, data[,,t],patches, species, a)
+		
+		# total number of individuals to leave and stay in the patch##
+		migrate <- d*birth
+		stay <- birth - migrate
+		
+	  ##total migrants of each spp##
+		totalmigrate <- rep (NA, species)
+		for (s in 1:species) {
+		totalmigrate[s] <- sum(migrate[s,])
+		}
+		
+		# probability of dispersing to each patch based on disp kernel###
+    dispprob<-generate_dispersal_matrices(mylandscape, species, patches, dispkern, torus=TRUE)
+		
+		# determine where each individual migrates 
+		
+		migratelocationbypatch=array(NA, c(patches, patches, species))
+		for (s in 1:species) {
+		  for (p in 1:patches){
+		   migratelocationbypatch[p,,s] <-  migrate[s,p] %*% dispprob[p,,s]
+		  }
+		}
+		
+		##total number of immigrants in each patch after dispersal##
+
+		migratelocation=matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+		   migratelocation[s,] <-  colSums(migratelocationbypatch[,,s])
+		 }
+
+		# Number of individuals in each patch after individuals have moved
+		data[,,t+1] <- stay + migratelocation	
+		
+	}
+return(data)
+}
+
+
+
+```
+
