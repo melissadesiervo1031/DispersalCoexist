@@ -749,9 +749,9 @@ randommovement2spp<-ggplot(sumpatchrandom2 ,aes(x=timestep,y=N,colour=species, s
 
 
 
-jpeg("C:/Users/Melissa/Dropbox/Coexistance stuff/Dispersal/passivedisp1.jpeg", width = 6, height = 5, units = 'in', res = 600)
-randommovement2spp
-dev.off()
+#jpeg("C:/Users/Melissa/Dropbox/Coexistance stuff/Dispersal/passivedisp1.jpeg", width = 6, height = 5, units = 'in', res = 600)
+#randommovement2spp
+#dev.off()
 
 
 
