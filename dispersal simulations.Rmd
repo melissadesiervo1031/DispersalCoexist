@@ -1981,8 +1981,6 @@ colnames(overall_directedlong) <- c("R", "d", "LDGR")
 
 ```
 
-
-
 ```{r heat map for density dependent (-)  movement}
 
 overall_dd_neg<- matrix(NA,nrow=length(R_vals), ncol=length(d_vals2), dimnames=list(p_vals,d_vals2))
@@ -2093,7 +2091,6 @@ overall_dd_neglong<-melt(overall_dd_neg)
 colnames(overall_dd_neglong) <- c("R", "d", "LDGR")
 
 ```
-
 
 
 ```{r heat map for density dependent (+)  movement}

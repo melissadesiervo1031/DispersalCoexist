@@ -6,233 +6,49 @@ library(tidyr)
 library(foreach)
 library(som.nn)
 library(mcomsimr)
-devtools::install_github("plthompson/mcomsimr")
+#devtools::install_github("plthompson/mcomsimr")
 ```
 
 
-
-```{r spatially explicit dispersal practice}
-###
-
-patches <- 36 # Number of patches..needs to be an even square (6 X 6)
-
-##patches in landscape form, with x and y coordinates ##
-
-dimx<-sqrt(patches)
-patchnums<-seq(from = 1, to = dimx)
-
-x<- rep(patchnums, times=dimx)
-y<- rep(patchnums, each=dimx)
-
-mylandscape<-cbind(x,y)
-
-plot(y ~ x, mylandscape) ##my landscape###
-
-###distance from each patch to each other patch in a torus##
-
-dist_matMC <- as.matrix(dist.torus(coors = mylandscape)) ##t distances between each patch to each other patch##
-
-##slope of the dispersal kernel##
-w=0.1
-
-######
-
-species <- 2   # Number of species
-time <- 100	   # Length of time (generations) to run model
-
-results <- array(NA, c(species, patches, time))
-results[,,1] <- 1000
+### Functions ###
 
 
-# Model parameterization 
-d <- c(.05, .05) # Dispersal rates for each species
-
-a <- 1/2000		# Beverton-holt alpha for all species 
-
-# Density independent growth rate that varies among patches###
-R <- matrix(NA, nrow=species, ncol=patches)
-R[1, 1:(patches/2)] <- 1.6
-R[1, ((patches/2)+1):patches] <- 1.3
-R[2, 1:(patches/2)] <- 1.25
-R[2, ((patches/2)+1):patches] <- 1.65
-
-###
-w = 0.5  ###dispersal kernel the exponential rate at which dispersal decreases as a function of the distance between patches ###
-
-rdetlandscape <- function(R,d,a,patches,species,data,time, w) {
-	
-	for (t in 1:(time-1)){
-		
-		# Number of individuals in each patch before dispersal###
-		birth <- b(R, data[,,t],patches, species, a)
-		
-		# total number of individuals to leave and stay in the patch##
-		migrate <- d*birth
-		stay <- birth - migrate
-		
-	  ##total migrants of each spp##
-		totalmigrate <- rep (NA, species)
-		for (s in 1:species) {
-		totalmigrate[s] <- sum(migrate[s,])
-		}
-		
-		# probability of dispersing to each patch based on disp kernel###
-		dispprob <- array(NA, c(patches, patches, species))
-		dispprob1 <- array(NA, c(patches, patches, species))
-		for (s in 1:species) {
-		   dispprob1[,,s] <- exp(-1*w*dist_matMC)  ## dispersal kernel ###
-		   diag(dispprob1[,,s]) <- 0  #### make diag 0, so migraters can't stay in same patch##
-		   dispprob[,,s] <- apply(dispprob1[,,s], 1, function(x) x/sum(x)) ###divide by the sum of each row so probability adds up to 1 ###
-		}
-		
-				# determine where each individual migrates 
-		### this works!!!###
-		migratelocationbypatch=array(NA, c(patches, patches, species))
-		for (s in 1:species) {
-		  for (p in 1:patches){
-		   migratelocationbypatch[p,,s] <-  migrate[s,p] %*% dispprob[p,,s]
-		  }
-		}
-		
-		##total number of immigrants in each patch after dispersal##
-
-		migratelocation=matrix(NA, nrow=species, ncol=patches)
-		for (s in 1:species) {
-		   migratelocation[s,] <-  colSums(migratelocationbypatch[,,s])
-		 }
-
-		# Number of individuals in each patch after individuals have moved
-		data[,,t+1] <- stay + migratelocation	
-		
-	}
-return(data)
-}
+```{r make landscape function }
 
 
+ ### Rmax = average patch growth rate, SS = how much source sink dynamics you want (when = 1, no variation across patches), sd R = variation in patch (if 0 all patches same)
 
+generate_landscape_growthrate<- function(meanR,SS,sdR, species, patches){
+  
+  ##patches in landscape form, with x and y coordinates ##
 
+    dimx<-sqrt(patches)
+    patchnums<-seq(from = 1, to = dimx)
+
+    x<- rep(patchnums, times=dimx)
+    y<- rep(patchnums, each=dimx)
+
+    mylandscape<-cbind(x,y)
+    
+    R <- matrix(NA, nrow=species, ncol=patches)   ### this works for 2 species..will need to be rewritted for more sp#
+    R[1, sample.int(patches, patches/2, replace = FALSE)] <- rnorm(patches/2, mean = ifelse(SS<1, meanR+(1-SS), meanR), sd = sdR)
+    R[2,is.na(R[1,])] <- rnorm(patches/2, mean = ifelse(SS<1, meanR+(1-SS), meanR), sd = sdR)
+    R[1,is.na(R[1,])] <- rnorm(patches/2, mean = meanR*SS, sd = sdR)
+    R[2,is.na(R[2,])] <- rnorm(patches/2, mean = meanR*SS, sd = sdR)
+    
+    mylandscapeR<-list(mylandscape, R)
+    
+    mylandscapeRdf=cbind.data.frame(mylandscape, Rsp1=R[1,])
+    
+     g<-ggplot(mylandscapeRdf, aes(x=x, y=y, size=as.factor(round(Rsp1, digits=2))))+geom_point()+theme_bw()+theme(legend.title=element_blank())
+     
+     #print(g)
+    
+    return(mylandscapeR)
+
+  }
 
 ```
-
-
-
-```{r spatially explicit dispersal practice 2}
-###
-
-patches <- 36 # Number of patches..needs to be an even square (6 X 6)
-
-##patches in landscape form, with x and y coordinates ##
-
-dimx<-sqrt(patches)
-patchnums<-seq(from = 1, to = dimx)
-
-x<- rep(patchnums, times=dimx)
-y<- rep(patchnums, each=dimx)
-
-mylandscape<-cbind(x,y)
-
-plot(y ~ x, mylandscape) ##my landscape###
-
-###distance from each patch to each other patch in a torus##
-
-dist_matMC <- as.matrix(dist.torus(coors = mylandscape)) ##t distances between each patch to each other patch##
-
-##slope of the dispersal kernel##
-w=0.1
-
-######
-
-species <- 2   # Number of species
-time <- 100	   # Length of time (generations) to run model
-
-results <- array(NA, c(species, patches, time))
-results[,,1] <- 1000
-
-
-# Model parameterization 
-d <- c(.05, .05) # Dispersal rates for each species
-
-a <- 1/2000		# Beverton-holt alpha for all species 
-
-# Density independent growth rate that varies among patches###
-R <- matrix(NA, nrow=species, ncol=patches)
-R[1, 1:(patches/2)] <- 1.6
-R[1, ((patches/2)+1):patches] <- 1.3
-R[2, 1:(patches/2)] <- 1.25
-R[2, ((patches/2)+1):patches] <- 1.65
-
-
-dispkern=0.1 #steepness of the dispersal kernel ##
-
-#Disp_array function modified ##
-
-generate_dispersal_matrices_mod <- function(landscape, species, 
-                                        patches = patches, dispkern,
-                                        torus = TRUE){
-  
-  if(torus == TRUE){
-    dist_mat <- as.matrix(som.nn::dist.torus(coors = landscape))
-  } else {
-    dist_mat <- as.matrix(dist(landscape))
-  }
-  
-  disp_array <- array(dim = c(patches, patches, species))
-  for(k in 1:species){
-    spec_dist_mat <- exp(-1*dispkern*dist_mat) 
-    diag(spec_dist_mat) <- 0  #### make diag 0, so migraters can't stay in same patch##
-    # next, make all cols sum to 1
-    disp_array[,,k] <- apply(spec_dist_mat, 1, function(x) x / sum(x))
-    if (sum(colSums(disp_array[,,k]) > 1.001) > 0) warning (
-      "dispersal from a patch to all others exceeds 100%. 
-      Make sure the rowSums(disp_mat) <= 1")
-    if (sum(colSums(disp_array[,,k]) < 0.999) > 0) warning (
-      "dispersal from a patch to all others is less than 100%. 
-      Some dispersing individuals will be lost from the metacommunity")
-  }
-  
-  return(disp_array)
-  
-
-  }
-
-
-
-
-
-##nathan Disp_array function ##
-
-generate_dispersal_matrices <- function(landscape, species, 
-                                        patches = patches, 
-                                        species_traits, torus = TRUE){
-  
-  if(torus == TRUE){
-    dist_mat <- as.matrix(som.nn::dist.torus(coors = landscape))
-  } else {
-    dist_mat <- as.matrix(dist(landscape))
-  }
-  
-  disp_array <- array(dim = c(patches, patches, species))
-  for(k in 1:species){
-    spec_dist_mat <- exp(-species_traits[k,"kernel_exp"] * dist_mat)
-    # next, make all cols sum to 1
-    disp_array[,,k] <- apply(spec_dist_mat, 1, function(x) x / sum(x))
-    if (sum(colSums(disp_array[,,k]) > 1.001) > 0) warning (
-      "dispersal from a patch to all others exceeds 100%. 
-      Make sure the rowSums(disp_mat) <= 1")
-    if (sum(colSums(disp_array[,,k]) < 0.999) > 0) warning (
-      "dispersal from a patch to all others is less than 100%. 
-      Some dispersing individuals will be lost from the metacommunity")
-  }
-  
-  return(disp_array)
-  
-
-  }
-
-
-```
-
-
 
 
 ```{r dispersal kernel function }
@@ -247,7 +63,7 @@ generate_dispersal_matrices<- function(landscape, species,
                                         torus = TRUE){
   
   if(torus == TRUE){
-    dist_mat <- as.matrix(som.nn::dist.torus(coors = landscape))
+    dist_mat <- as.matrix(dist.torus(coors = landscape))
   } else {
     dist_mat <- as.matrix(dist(landscape))
   }
@@ -276,52 +92,9 @@ generate_dispersal_matrices<- function(landscape, species,
 ```
 
 
+## functions and model run passive global vs. passive local comparison ##
 
-
-```{r make landscape w/ dens independent growth rate function }
-###
-
-patches <- 36 # Number of patches..needs to be an even square (6 X 6)
-
-#Disp_array function modified ##
-
-generate_landscape_growthrate<- function(Rmax, species, patches){
-  
-  ##patches in landscape form, with x and y coordinates ##
-
-    dimx<-sqrt(patches)
-    patchnums<-seq(from = 1, to = dimx)
-
-    x<- rep(patchnums, times=dimx)
-    y<- rep(patchnums, each=dimx)
-
-    mylandscape<-cbind(x,y)
-    
-    R <- matrix(NA, nrow=species, ncol=patches)
-    R[1, sample.int(patches, patches/2, replace = FALSE)] <- Rmax ## 
-    R[2,is.na(R[1,])] <- Rmax-(Rmax/patches)
-    R[1,is.na(R[1,])] <- Rmax-Rmax/4-Rmax/patches
-    R[2,is.na(R[2,])] <- Rmax-Rmax/4
-    
-    mylandscapeR=cbind.data.frame(mylandscape, Rsp1=R[1,])
-    
-     g<-ggplot(mylandscapeR, aes(x=x, y=y, size=as.factor(round(Rsp1, digits=2))))+geom_point()+theme_bw()+theme(legend.title=element_blank())
-     
-     print(g)
-    
-  return(R)
-
-
-  }
-
-
-
-
-```
-
-
-
-```{r spatially explicit dispersal practice 3}
+```{r model run with localized dispersal kernel}
 
 ###
 
@@ -330,27 +103,39 @@ species <- 2   # Number of species
 time <- 100	   # Length of time (generations) to run model
 
 results <- array(NA, c(species, patches, time))
-results[,,1] <- 1000
+results[,,1] <- 100
 
+## fill one patch with 100 individuals for each species in a source patch##
+
+resultssim1 <- array(NA, c(species, patches, time))
+resultssim1[,,1]<-0
+resultssim1[1,15,1] <- 100  ## source patch for sp 1##
+resultssim1[2,16,1] <- 100  ## source patch for sp 2##
 
 # Model parameterization 
 d <- c(.05, .05) # Dispersal rates for each species
 
 a <- 1/2000		# Beverton-holt alpha for all species 
 
-dispkern=0.1 #steepness of the dispersal kernel ##
+dispkern=0.5 #steepness of the dispersal kernel ##
 
-####### The whole simulation w/ random localized dispersal ####
 
-rdetkernel <- function(Rmax,d,a,dispkern, patches,species,data,time) {
+##make the landscape and assign R ###
+
+
+sim1<-generate_landscape_growthrate(1.5,0.3, sdR=0, species=2, patches=36)
+
+landscapesim1<-data.frame(sim1[1])
+
+Rsim1<-matrix(unlist(sim1[2]), nrow=2)
+
+####### The whole function w/ random localized dispersal ####
+
+rdetkernel <- function(mylandscape, R,d,a,dispkern, patches,species,data,time) {
 	
 	for (t in 1:(time-1)){
 	  
-	  #make landscape ###
-	  
-	  mylandscape<-generate_landscape_growthrate(Rmax, species, patches)
-		
-		# Number of individuals in each patch before dispersal (time t + h)###
+	  # Number of individuals in each patch before dispersal (time t + h)###
 		birth <- b(R, data[,,t],patches, species, a)
 		
 		# total number of individuals to leave and stay in the patch##
@@ -391,5 +176,650 @@ return(data)
 
 
 
+###bookeeping###
+
+dispnames <- vector("numeric", length=length(d_vals))
+for(i in 1:length(d_vals)){
+  dispnames[i] <- paste("d=", d_vals[i])
+}
+
+speciesnames <- vector("numeric", length=species)
+for(i in 1:species){
+  speciesnames[i] <- paste("species", i)
+}
+
+
+patchnames <- vector("numeric", length=patches)
+for(i in 1:patches){
+  patchnames[i] <- paste("patch", i)
+}
+
+timenames <- vector("numeric", length=time)
+for(i in 1:time){
+  timenames[i] <- paste("timestep", i)
+}
+
+
+
+## run this function over increasing d ####
+
+d_vals2=c(0, 0.05, 0.1, 0.5, 0.9)
+
+d_vals<-as.matrix(rbind(d_vals2, d_vals2))
+
+simkernelvaryd <- foreach(i=d_vals[1:2,], j=d_vals[,1:length(d_vals2)]) %do% 
+rdetkernel(landscapesim1, Rsim1, d=c(i,j),a, dispkern, patches, species, resultssim1, time)
+
+##array output with labels ##
+simkernelvaryd2<-array(as.numeric(unlist(simkernelvaryd )), dim=c(species,patches,time,length(d_vals)), dimnames=list(speciesnames, patchnames, timenames,dispnames)) ##array with labels####
+
+
 ```
+
+
+```{r model run with global dispersal}
+
+###
+
+patches <- 36 # Number of patches..needs to be an even square (6 X 6)
+species <- 2   # Number of species
+time <- 100	   # Length of time (generations) to run model
+
+results <- array(NA, c(species, patches, time))
+results[,,1] <- 10
+
+
+# Model parameterization 
+d <- c(.05, .05) # Dispersal rates for each species
+
+a <- 1/2000		# Beverton-holt alpha for all species 
+
+
+
+## Model run with global dispersal ##
+
+# Function definition for deterministic model run ### random movement between patches##
+
+
+rdet <- function(mylandscape, R,d,a,patches,species,data,time) {
+	
+	for (t in 1:(time-1)){
+		
+			# Number of individuals in each patch after pop growth but before dispersal###
+		birth <- b(R, data[,,t],patches, species, a)
+		
+		# dispersal
+		migrate <- d*birth
+		stay <- birth - migrate
+		
+		totalmigrate <- rep (NA, species)
+		for (s in 1:species) {
+			totalmigrate[s] <- sum(migrate[s,])
+		}
+		
+		# determine where each individual migrates
+		migratelocation <- matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+			migratelocation[s,] <- rep(totalmigrate[s]/patches, patches)
+		}
+		
+		# Number of individuals in each patch after individuals have moved
+		data[,,t+1] <- stay + migratelocation	
+		
+	}
+return(data)
+}
+
+
+
+###bookeeping###
+
+dispnames <- vector("numeric", length=length(d_vals))
+for(i in 1:length(d_vals)){
+  dispnames[i] <- paste("d=", d_vals[i])
+}
+
+speciesnames <- vector("numeric", length=species)
+for(i in 1:species){
+  speciesnames[i] <- paste("species", i)
+}
+
+
+patchnames <- vector("numeric", length=patches)
+for(i in 1:patches){
+  patchnames[i] <- paste("patch", i)
+}
+
+timenames <- vector("numeric", length=time)
+for(i in 1:time){
+  timenames[i] <- paste("timestep", i)
+}
+
+
+
+## run this function over increasing d ####
+
+d_vals2=c(0, 0.05, 0.1, 0.5, 0.9)
+
+d_vals<-as.matrix(rbind(d_vals2, d_vals2))
+
+globalvaryd <- foreach(i=d_vals[1:2,], j=d_vals[,1:length(d_vals2)]) %do% 
+rdet(landscapesim1,Rsim1, d=c(i,j),a, patches, species, resultssim1, time)
+
+
+##array output with labels ##
+globalvaryd2<-array(as.numeric(unlist(globalvaryd)), dim=c(species,patches,time,length(d_vals)), dimnames=list(speciesnames, patchnames, timenames,dispnames)) ##array with labels####
+
+
+```
+
+
+```{r plot dispersal kernel varying d , echo=FALSE}
+
+###turn array into dataframe###
+
+simkerneldf <- as.data.frame.table(simkernelvaryd2)
+
+colnames(simkerneldf) <- c("species", "patch", "timestep", "d", "N")
+
+simkerneldf$species<-as.numeric(simkerneldf$species)
+simkerneldf$patch<-as.numeric(simkerneldf$patch)
+simkerneldf$timestep<-as.numeric(simkerneldf$timestep)
+simkerneldf$d <- with(simkerneldf, gsub("d=","", d))
+
+
+##assign R values to patches###
+ 
+##assign R values to patches###
+
+head(Rsim1)
+Rsim1_2<-as.data.frame(t(Rsim1))
+
+patch=rownames(Rsim1_2)
+
+Rsim1_3<-cbind(patch, Rsim1_2)
+
+Rsim1_3<-Rsim1_3 %>% rename(Rsp1 = V1,Rsp2 = V2)
+
+##merge back to dataframe###
+
+simkerneldf2<-merge.data.frame(simkerneldf, Rsim1_3, by="patch")
+
+
+
+##column for patch type###
+
+simkerneldf3<-simkerneldf2%>% mutate(patchtype=ifelse(Rsp1 > Rsp2,"Source sp 1 / Sink sp 2", "Source sp 2 / Sink sp 1"))
+
+
+
+###sum across patch types####
+
+sumpatchkernel<-simkerneldf3 %>%
+  group_by(species, timestep, d, patchtype) %>%
+  summarise(N = sum(N))
+
+sumpatchkernel$species=as.factor(sumpatchkernel$species)
+sumpatchkernel$timestep<-as.numeric(sumpatchkernel$timestep)
+
+
+
+##subset##
+sumpatchkernel2<-subset(sumpatchkernel, d==" 0"|d==" 0.05"|d==" 0.5")
+
+
+
+#plot##
+
+
+mytheme<- theme_bw()+ theme(axis.line.x= element_line(colour = "black", size=0.3))+theme(axis.line.y= element_line(colour = "black", size=0.3))+theme(axis.text.x=element_text(size=10, colour = "black"))+theme(axis.text.y=element_text(size=10, colour = "black"))+theme(axis.title=element_text(size=12))+theme(plot.title=element_text(size=12) +theme(plot.title = element_text(hjust = 0.5)))+theme(plot.title = element_text(margin=margin(0,0,5,0)))
+
+sumpatchkernel2$d<-as.factor(sumpatchkernel2$d)
+sumpatchkernel2$patchtype<-as.factor(sumpatchkernel2$patchtype)
+
+sumpatchkernel2$species<-as.factor(sumpatchkernel2$species)
+
+
+kernel2spp<-ggplot(sumpatchkernel ,aes(x=timestep,y=N,colour=species, shape=patchtype), show.legend = F) +geom_line(aes(linetype=patchtype), size=1.5, position=position_dodge(width=2))+facet_grid(d~species, labeller = label_both)+xlab("Time")+ylab("Abundance")+ggtitle("Localized passive dispersal (disp kernel)")+mytheme+ scale_colour_manual(values = c("black", "brown"))
+
+###
+```
+
+
+```{r plot global disp varying d , echo=FALSE}
+
+###turn array into dataframe###
+
+globalvarydf <- as.data.frame.table(globalvaryd2)
+
+colnames(globalvarydf) <- c("species", "patch", "timestep", "d", "N")
+
+globalvarydf$species<-as.numeric(globalvarydf$species)
+globalvarydf$patch<-as.numeric(globalvarydf$patch)
+globalvarydf$timestep<-as.numeric(globalvarydf$timestep)
+globalvarydf$d <- with(globalvarydf, gsub("d=","", d))
+
+
+##assign R values to patches###
+
+head(Rsim1)
+Rsim1_2<-as.data.frame(t(Rsim1))
+
+patch=rownames(Rsim1_2)
+
+Rsim1_3<-cbind(patch, Rsim1_2)
+
+Rsim1_3<-Rsim1_3 %>% rename(Rsp1 = V1,Rsp2 = V2)
+
+##merge back to dataframe###
+
+globalvarydf2<-merge.data.frame(globalvarydf, Rsim1_3, by="patch")
+
+
+
+##column for patch type###
+
+globalvarydf3<-globalvarydf2%>% mutate(patchtype=ifelse(Rsp1 > Rsp2,"Source sp 1 / Sink sp 2", "Source sp 2 / Sink sp 1"))
+
+
+
+###sum across patch types####
+
+sumpatchglobal<-globalvarydf3 %>%
+  group_by(species, timestep, d, patchtype) %>%
+  summarise(N = sum(N))
+
+sumpatchglobal$species=as.factor(sumpatchglobal$species)
+sumpatchglobal$timestep<-as.numeric(sumpatchglobal$timestep)
+
+
+
+##subset##
+sumpatchglobal2<-subset(sumpatchglobal, d==" 0"|d==" 0.05"|d==" 0.5")
+
+
+
+#plot##
+
+
+mytheme<- theme_bw()+ theme(axis.line.x= element_line(colour = "black", size=0.3))+theme(axis.line.y= element_line(colour = "black", size=0.3))+theme(axis.text.x=element_text(size=10, colour = "black"))+theme(axis.text.y=element_text(size=10, colour = "black"))+theme(axis.title=element_text(size=12))+theme(plot.title=element_text(size=12) +theme(plot.title = element_text(hjust = 0.5)))+theme(plot.title = element_text(margin=margin(0,0,5,0)))
+
+sumpatchglobal$d<-as.factor(sumpatchglobal$d)
+sumpatchglobal$patchtype<-as.factor(sumpatchglobal$patchtype)
+
+sumpatchglobal$species<-as.factor(sumpatchglobal$species)
+
+
+global2spp<-ggplot(sumpatchglobal ,aes(x=timestep,y=N,colour=species, shape=patchtype), show.legend = F) +geom_line(aes(linetype=patchtype), size=1.5)+facet_grid(d~species, labeller = label_both)+xlab("Time")+ylab("Abundance")+ggtitle("Global dispersal")+mytheme+ scale_colour_manual(values = c("black", "brown"))
+
+
+
+
+
+###
+```
+
+############## Decomposing coexistence ####
+
+#Function definition for deterministic model run for determining Chessonian coexistence
+
+
+```{r model function definition Chessonian coexistence (Global passive movement)}
+
+# Function definition for deterministic model run for determining Chessonian coexistence 
+# (neutral, species sorting, or mass effects)
+rdetChesson <- function(mylandscape, R,d,a,patches,species,data,invader,invadeTotal,time) {
+	
+	for (t in 1:(time-1)){
+	
+		# Number of individuals in each patch after pop growth but before dispersal###
+		birth <- b(R, data[,,t],patches, species, a)
+		
+		# dispersal
+		migrate <- d*birth
+		stay <- birth - migrate
+		
+		totalmigrate <- rep (NA, species)
+		for (s in 1:species) {
+			totalmigrate[s] <- sum(migrate[s,])
+		}
+		
+		# determine where each individual migrates
+		migratelocation <- matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+			migratelocation[s,] <- rep(totalmigrate[s]/patches, patches)
+		}
+		
+		# Determine number of individuals in each patch
+		data[,,t+1] <- stay + migratelocation	
+
+		
+		# Reset the invader
+		data[invader,,t+1] <- data[invader,,t+1] / sum(data[invader,,t+1]) * invadeTotal
+		
+	}
+return(data)
+}
+
+
+```
+
+
+```{r model function definition Chessonian coexistence (localized passive kernel)}
+
+# Function definition for deterministic model run for determining Chessonian coexistence 
+# (neutral, species sorting, or mass effects)
+rkernelChesson <- function(mylandscape, R,d,a,dispkern, patches,species,data,invader,invadeTotal,time) {
+	
+	for (t in 1:(time-1)){
+	
+	  		# Number of individuals in each patch before dispersal (time t + h)###
+		birth <- b(R, data[,,t],patches, species, a)
+		
+		# total number of individuals to leave and stay in the patch##
+		migrate <- d*birth
+		stay <- birth - migrate
+		
+	  ##total migrants of each spp##
+		totalmigrate <- rep (NA, species)
+		for (s in 1:species) {
+		totalmigrate[s] <- sum(migrate[s,])
+		}
+		
+		# probability of dispersing to each patch based on disp kernel###
+    dispprob<-generate_dispersal_matrices(mylandscape, species, patches, dispkern, torus=TRUE)
+		
+		# determine where each individual migrates 
+		
+		migratelocationbypatch=array(NA, c(patches, patches, species))
+		for (s in 1:species) {
+		  for (p in 1:patches){
+		   migratelocationbypatch[p,,s] <-  migrate[s,p] %*% dispprob[p,,s]
+		  }
+		}
+		
+		##total number of immigrants in each patch after dispersal##
+
+		migratelocation=matrix(NA, nrow=species, ncol=patches)
+		for (s in 1:species) {
+		   migratelocation[s,] <-  colSums(migratelocationbypatch[,,s])
+		 }
+
+		# Number of individuals in each patch after individuals have moved
+		data[,,t+1] <- stay + migratelocation	
+
+		
+		# Reset the invader
+		data[invader,,t+1] <- data[invader,,t+1] / sum(data[invader,,t+1]) * invadeTotal
+		
+	}
+return(data)
+}
+
+
+```
+
+
+### Deconstruct chessoian coexistence for each one and plot ###
+
+
+```{r deconstruct coexistence global passive}
+
+##Determining Chessonian coexistence strength and contributions from
+# the storage effect, fitness density covariance, and nonspatial fitness
+
+runs <- 1   # Number of runs (for stochastic models)
+nonspatial <- storage <- fitness <- overall <- check <- rep(NA, runs)
+
+invader <- 1  # Resident dynamics (all species that are not the invader) run to equilibrium. 
+
+	results <- array(NA, c(species, patches, time))
+	results[,,1] <- 1000
+	results[invader,,1] <- 0 # Remove the invader species from the metacommunity
+	
+	# Running the model to equilibrium without the invader
+	modelRun <- rdet(landscapesim1,Rsim1, d,a, patches, species, resultssim1, time)
+	
+	# Then run invader to equilibrium spatial distribution, holding the global
+	# abundance to a very low density
+	iabun <- .005*(sum(modelRun[,,time]))
+	invade <- rep(iabun/patches,patches) ##divides equally among the patches##
+	
+	# Set up array to store results with the invader at low density
+	co_results <- array(NA, c(species, patches, time))
+	co_results[,,1] <- modelRun[,,time]
+	co_results[invader,,1] <- invade # species i invades at time step 1
+	
+	modelRunChesson <- rdetChesson(landscapesim1, Rsim1,d,a,patches,species,co_results,invader,iabun,time)
+	
+	##each patch at it's equilibrium densityy##
+	
+	# Now do one more time step, keeeping track of changes in population before vs. after			
+	N_start <- modelRunChesson[,,time] # starting population size
+	N_startj <- N_start[-invader,]     # j is all resident species
+	N_starti <- N_start[invader,]	   # i is invader species
+	
+	# Determine relative abundances
+	v <- matrix(NA, nrow=species, ncol=patches)
+	for (i in 1:species) {
+		v[i,] <- N_start[i,]/mean(N_start[i,])
+	}
+	
+	v_i <- v[invader,]
+	v_j <- v[-invader,]
+	
+	# Determine fitness
+	N_birth <- b(R, N_start, patches, species, a) # Population after 1 time step
+	N_birthi <- N_birth[invader,]
+	N_birthj <- N_birth[-invader,]
+	
+	# Calculate average fitness across the metacommunity
+	R_bar <- rep(NA,species)
+	for (i in 1:species) {
+		R_bar[i] <- mean(R[i,])
+	}
+	
+	R_bari <- R_bar[invader]
+	R_barj <- R_bar[-invader]
+	
+	# Calculate environmental component
+	E <- R/R_bar 
+	Ei <- E[invader,]
+	Ej <- E[-invader,]
+	
+	# Calculate competitive term
+	C <- matrix(NA, nrow=species, ncol=patches) 
+	for (p in 1: patches) {
+		C[,p] <-rep(1-bevHoltC(N_start[,p],a), species)
+	}
+	C <- C[invader,]
+	
+	
+	#Overall invasion criterion
+	lambda_tilde_i <- sum(N_birthi) / sum(N_starti) #Overall global growth rate
+	lambda_i_community_level <- (lambda_tilde_i - 1) / R_bari
+	
+	lambda_tilde_j <- sum(N_birthj) / sum(N_startj) #Overall global growth rate
+	lambda_j_community_level <- (lambda_tilde_j - 1) / R_barj
+
+	
+	print(paste("Metacommunity Growth Rate is", round(lambda_i_community_level-lambda_j_community_level,3)))
+	print(paste(" Invade?", lambda_i_community_level-lambda_j_community_level > 0))
+	
+	# ----------------------------------------------------------------
+	# Components for coexistence, broxen down into the specific mechanisms
+	
+	lambda_tilde_prime <- (1/mean(R_barj))-(1/R_bari) # Non-spatial fitness
+		
+	storageEffect <- -covp( Ei-Ej,C )				  # Storage effect
+	
+	fd1 <- covp( R[invader,]*(1-C), v_i )/R_bari
+	
+	fd2 <- covp( R[-invader,]*(1-C), v_j )/R_barj
+	
+	fitnessDensityCov <- fd1- fd2				 	# Fitness density covariance
+	
+	total <- lambda_tilde_prime + storageEffect + fitnessDensityCov
+	
+# Store results of coexistence mechanisms
+nonspatial<-lambda_tilde_prime
+storage <- storageEffect
+fitness <- fitnessDensityCov
+overallr <- total
+
+	
+coexistrandom<-as.data.frame(rbind(overallr, storage, fitness, nonspatial))
+coexistrandom1 <- tibble::rownames_to_column(coexistrandom, "Mechanism")
+
+coexistrandom2<-coexistrandom1 %>% mutate(Mechanism2 =Mechanism)%>% mutate(model ="Global Passive dispersal")
+
+
+coexistrandom2$Mechanism2<-plyr::mapvalues(coexistrandom2$Mechanism, from=c("overallr", "storage", "fitness","nonspatial" ), to=c("Total", "Storage effect", "Fitness-density cov", "Non-spatial"))
+
+coexistrandom2$Mechanism2<- factor(coexistrandom2$Mechanism2, levels = c("Total", "Storage effect", "Fitness-density cov", "Non-spatial"))
+
+###
+```
+
+
+```{r deconstruct coexistence localized kernel}
+
+##Determining Chessonian coexistence strength and contributions from
+# the storage effect, fitness density covariance, and nonspatial fitness
+
+runs <- 1   # Number of runs (for stochastic models)
+nonspatial <- storage <- fitness <- overall <- check <- rep(NA, runs)
+
+invader <- 1  # Resident dynamics (all species that are not the invader) run to equilibrium. 
+
+	results <- array(NA, c(species, patches, time))
+	results[,,1] <- 1000
+	results[invader,,1] <- 0 # Remove the invader species from the metacommunity
+	
+	# Running the model to equilibrium without the invader
+	modelRunkernel <- rdetkernel(landscapesim1,Rsim1, d,a, dispkern=0.7,patches, species, resultssim1, time)
+	
+	# Then run invader to equilibrium spatial distribution, holding the global
+	# abundance to a very low density
+	iabun <- .005*(sum(modelRunkernel[,,time]))
+	invade <- rep(iabun/patches,patches) ##divides equally among the patches##
+	
+	# Set up array to store results with the invader at low density
+	co_results <- array(NA, c(species, patches, time))
+	co_results[,,1] <- modelRunkernel[,,time]
+	co_results[invader,,1] <- invade # species i invades at time step 1
+	
+	modelRunChessonkern <- rkernelChesson(landscapesim1, Rsim1,d,a,dispkern=0.7, patches,species,co_results,invader,iabun,time)
+	
+	##each patch at it's equilibrium densityy##
+	
+	# Now do one more time step, keeeping track of changes in population before vs. after			
+	N_start <- modelRunChessonkern[,,time] # starting population size
+	N_startj <- N_start[-invader,]     # j is all resident species
+	N_starti <- N_start[invader,]	   # i is invader species
+	
+	# Determine relative abundances
+	v <- matrix(NA, nrow=species, ncol=patches)
+	for (i in 1:species) {
+		v[i,] <- N_start[i,]/mean(N_start[i,])
+	}
+	
+	v_i <- v[invader,]
+	v_j <- v[-invader,]
+	
+	# Determine fitness
+	N_birth <- b(R, N_start, patches, species, a) # Population after 1 time step
+	N_birthi <- N_birth[invader,]
+	N_birthj <- N_birth[-invader,]
+	
+	# Calculate average fitness across the metacommunity
+	R_bar <- rep(NA,species)
+	for (i in 1:species) {
+		R_bar[i] <- mean(R[i,])
+	}
+	
+	R_bari <- R_bar[invader]
+	R_barj <- R_bar[-invader]
+	
+	# Calculate environmental component
+	E <- R/R_bar 
+	Ei <- E[invader,]
+	Ej <- E[-invader,]
+	
+	# Calculate competitive term
+	C <- matrix(NA, nrow=species, ncol=patches) 
+	for (p in 1: patches) {
+		C[,p] <-rep(1-bevHoltC(N_start[,p],a), species)
+	}
+	C <- C[invader,]
+	
+	
+	#Overall invasion criterion
+	lambda_tilde_i <- sum(N_birthi) / sum(N_starti) #Overall global growth rate
+	lambda_i_community_level <- (lambda_tilde_i - 1) / R_bari
+	
+	lambda_tilde_j <- sum(N_birthj) / sum(N_startj) #Overall global growth rate
+	lambda_j_community_level <- (lambda_tilde_j - 1) / R_barj
+
+	
+	print(paste("Metacommunity Growth Rate is", round(lambda_i_community_level-lambda_j_community_level,3)))
+	print(paste(" Invade?", lambda_i_community_level-lambda_j_community_level > 0))
+	
+	# ----------------------------------------------------------------
+	# Components for coexistence, broxen down into the specific mechanisms
+	
+	lambda_tilde_prime <- (1/mean(R_barj))-(1/R_bari) # Non-spatial fitness
+		
+	storageEffect <- -covp( Ei-Ej,C )				  # Storage effect
+	
+	fd1 <- covp( R[invader,]*(1-C), v_i )/R_bari
+	
+	fd2 <- covp( R[-invader,]*(1-C), v_j )/R_barj
+	
+	fitnessDensityCov <- fd1- fd2				 	# Fitness density covariance
+	
+	total <- lambda_tilde_prime + storageEffect + fitnessDensityCov
+	
+# Store results of coexistence mechanisms
+nonspatial<-lambda_tilde_prime
+storage <- storageEffect
+fitness <- fitnessDensityCov
+overallr <- total
+
+	
+coexistkernel<-as.data.frame(rbind(overallr, storage, fitness, nonspatial))
+coexistkernel1 <- tibble::rownames_to_column(coexistkernel, "Mechanism")
+
+coexistkernel2<-coexistkernel1 %>% mutate(Mechanism2 =Mechanism)%>% mutate(model ="Localized dispersal kernel")
+
+
+coexistkernel2$Mechanism2<-plyr::mapvalues(coexistkernel2$Mechanism, from=c("overallr", "storage", "fitness","nonspatial" ), to=c("Total", "Storage effect", "Fitness-density cov", "Non-spatial"))
+
+coexistkernel2$Mechanism2<- factor(coexistkernel2$Mechanism2, levels = c("Total", "Storage effect", "Fitness-density cov", "Non-spatial"))
+
+###
+```
+
+
+
+##compare and plot##
+
+
+```{r deconstruct coexistence kernel movement}
+
+##global and local ###
+
+globallocal<-rbind(coexistrandom2, coexistkernel2)
+
+globallocal2<-globallocal %>% filter(Mechanism2 != "Non-spatial")
+
+
+mechanismsdisp<-ggplot(data=globallocal2, aes(x=Mechanism2, y=V1, fill=Mechanism2)) +
+  geom_bar(stat="identity")+xlab("")+ylab("LDGR")+facet_grid(~model)+mytheme +theme(axis.text.x = element_text(angle = 35, hjust = 1))
+
+###
+```
+
+
+p
 
